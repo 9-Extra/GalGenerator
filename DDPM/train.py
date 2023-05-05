@@ -11,14 +11,17 @@ import Diffusion
 
 from common import DataSet
 
+
 # 前向过程，为图像加上t次噪声，返回加上噪声后的图像和加上的噪声（训练用）
 def _forward_process(x_0: torch.Tensor, t: torch.Tensor) -> (torch.Tensor, torch.Tensor):
-    noise = torch.randn(x_0.size(), dtype=x_0.dtype, device=x_0.device) # 生成高斯噪声
-    alpha_over_line_sqrt_t = torch.index_select(Diffusion.alpha_over_line_sqrt, 0, t).view((-1, 1, 1 ,1))
-    one_sub_alpha_over_line_sqrt_t = torch.index_select(Diffusion.one_sub_alpha_over_line_sqrt, 0, t).view((-1, 1, 1 ,1))
+    noise = torch.randn(x_0.size(), dtype=x_0.dtype, device=x_0.device)  # 生成高斯噪声
+    alpha_over_line_sqrt_t = torch.index_select(Diffusion.alpha_over_line_sqrt, 0, t).view((-1, 1, 1, 1))
+    one_sub_alpha_over_line_sqrt_t = torch.index_select(Diffusion.one_sub_alpha_over_line_sqrt, 0, t).view(
+        (-1, 1, 1, 1))
     x_t = alpha_over_line_sqrt_t * x_0 + one_sub_alpha_over_line_sqrt_t * noise
 
     return x_t, noise
+
 
 def _train(model: Diffusion.Diffusion, data: DataLoader, optimizer: torch.optim.Optimizer, epoch: int, device):
     print("Start Training")
@@ -26,7 +29,7 @@ def _train(model: Diffusion.Diffusion, data: DataLoader, optimizer: torch.optim.
         total_loss = 0.0
         p = tqdm.tqdm(data, leave=True, file=sys.stdout)
         for batch in p:
-            t = torch.randint(0, Diffusion.T, [data.batch_size], device=device, dtype=torch.int) # 随机选一层[0..T)，比论文中的t小1
+            t = torch.randint(0, Diffusion.T, [data.batch_size], device=device, dtype=torch.int)  # 随机选一层[0..T)，比论文中的t小1
 
             x_t, noise = _forward_process(batch, t)
 
@@ -41,7 +44,7 @@ def _train(model: Diffusion.Diffusion, data: DataLoader, optimizer: torch.optim.
             #      cv2.imshow(f"Predicted", output.numpy(force=True).transpose((0, 2, 3, 1))[i, :, :, ::1])
             #      cv2.waitKey()
 
-            loss = torch.nn.functional.mse_loss(noise, output) # 优化估计出的噪声
+            loss = torch.nn.functional.mse_loss(noise, output)  # 优化估计出的噪声
             loss.backward()
             optimizer.step()
 
@@ -77,8 +80,9 @@ def run(
     model.forward(torch.rand([batch_size, 3, *Diffusion.IMAGE_SIZE], device=device), t)
     model.zero_grad()
     # 加载数据集
-    # data_loader = DataLoader(dataset= DataSet.DiskDataSet(source, device), batch_size=batch_size, shuffle=True, num_workers=0)
-    data_loader = DataLoader(dataset= DataSet.Cifar10DataSet("./cifar10", device), batch_size=batch_size, shuffle=True, num_workers=0, drop_last=True)
+    data_loader = DataLoader(dataset=DataSet.DiskDataSet(source, device), batch_size=batch_size, shuffle=True,
+                             num_workers=0)
+    # data_loader = DataLoader(dataset= DataSet.Cifar10DataSet("./cifar10", device), batch_size=batch_size, shuffle=True, num_workers=0, drop_last=True)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=0.0002)
 
