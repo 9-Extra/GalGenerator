@@ -1,0 +1,5 @@
+*.npy
+/DDPM/model/**
+/DDPM/data/**
+/DDPM/cifar10/**
+/论文/
