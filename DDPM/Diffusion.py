@@ -3,7 +3,8 @@ import argparse
 
 import torch
 from torch.nn import Module
-from common.common_layers import Conv2, Conv1, MultiHeadSelfAttention, MultiHeadSelfAttentionCV, ResBlock
+from common.common_layers import Conv2, Conv1, MultiHeadSelfAttention, MultiHeadSelfAttentionCV, ResBlock, \
+    TimeEmbedResBlock
 import torchsummary
 
 import torch.nn as nn
@@ -102,7 +103,10 @@ class Up(Module):
 
 
 class UNet(Module):
-    middle: Module
+    middle_res1: Module
+    middle_res2: Module
+    middle_attention: Module
+    middle_norm: Module
 
     def __init__(self, n_channels, time_embed_dim):
         super(UNet, self).__init__()
@@ -112,12 +116,10 @@ class UNet(Module):
         self.down3 = Down(128, 256, time_embed_dim)
         self.down4 = Down(256, 512, time_embed_dim)
 
-        self.middle = torch.nn.Sequential(
-            ResBlock(512, 512),
-            torch.nn.LayerNorm([512, 2, 2]),
-            MultiHeadSelfAttentionCV(512, 512),
-            ResBlock(512, 512),
-        )
+        self.middle_res1 = TimeEmbedResBlock(512, 512, time_embed_dim)
+        self.middle_norm = torch.nn.LayerNorm([512, 2, 2])
+        self.middle_attention = MultiHeadSelfAttentionCV(512, 512)
+        self.middle_res2 = TimeEmbedResBlock(512, 512, time_embed_dim)
 
         self.up1 = Up(512, 256, time_embed_dim)
         self.up2 = Up(256, 128, time_embed_dim)
@@ -131,7 +133,9 @@ class UNet(Module):
         x4 = self.down3(x3, embed)
         x5 = self.down4(x4, embed)
 
-        x5 = self.middle(x5)
+        x5 = self.middle_norm(self.middle_res1(x5, embed))
+        x5 = self.middle_attention(x5)
+        x5 = self.middle_res2(x5, embed)
 
         x = self.up1(x5, x4, embed)
         x = self.up2(x, x3, embed)

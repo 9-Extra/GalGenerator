@@ -213,3 +213,30 @@ class ResBlock(Module):
 
     def forward(self, x: torch.Tensor):
         return self.adjust(x) + self.conv2(self.conv1(x))
+
+
+class TimeEmbedResBlock(Module):
+    """
+    进行时间嵌入残差块，包含两个3x3卷积块，卷积块内使用group normal
+    """
+    out_dim: int
+
+    conv1: Module
+    conv2: Module
+    mlp: Module
+    adjust: Module
+
+    def __init__(self, in_dim: int, out_dim: int, time_embed_dim: int, group: int = 8):
+        super().__init__()
+        self.out_dim = out_dim
+
+        self.conv1 = Conv1(in_dim, out_dim, group)
+        self.conv2 = Conv1(out_dim, out_dim, group)
+        self.mlp = torch.nn.Linear(time_embed_dim, out_dim)
+        self.adjust = torch.nn.Identity() if in_dim == out_dim else torch.nn.Conv2d(in_dim, out_dim, 1)
+
+    def forward(self, x: torch.Tensor, time_emb: torch.Tensor):
+        h = self.conv1(x)
+        h = h + einops.rearrange(self.mlp(time_emb), "b c -> b c 1 1")
+        h = self.conv2(h)
+        return self.adjust(x) + h
