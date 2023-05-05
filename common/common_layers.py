@@ -6,12 +6,12 @@ from torch.nn import Module, functional
 
 # 3x3卷积
 class Conv1(Module):
-    def __init__(self, in_channel: int, out_channel: int, padding=1, active=True):
+    def __init__(self, in_channel: int, out_channel: int, group: int = 4, active=True):
         super().__init__()
         self.active = torch.nn.SELU(True) if active else torch.nn.Identity()
 
-        self.conv = nn.Conv2d(in_channel, out_channel, 3, padding=padding, bias=True)
-        self.norm = nn.GroupNorm(4, out_channel)
+        self.conv = nn.Conv2d(in_channel, out_channel, 3, padding=1, bias=True)
+        self.norm = nn.GroupNorm(group, out_channel)
 
     def forward(self, x: Tensor) -> Tensor:
         x = self.active(self.norm(self.conv(x)))
@@ -20,14 +20,14 @@ class Conv1(Module):
 
 # 2个 3x3卷积
 class Conv2(Module):
-    def __init__(self, in_channel: int, out_channel: int, active=True):
+    def __init__(self, in_channel: int, out_channel: int, group: int = 4, active=True):
         super().__init__()
         self.active = torch.nn.SELU(True) if active else torch.nn.Identity()
 
         self.conv1 = nn.Conv2d(in_channel, out_channel, 3, padding=1, bias=True)
-        self.norm1 = nn.GroupNorm(4, out_channel)
+        self.norm1 = nn.GroupNorm(group, out_channel)
         self.conv2 = nn.Conv2d(out_channel, out_channel, 3, padding=1, bias=True)
-        self.norm2 = nn.GroupNorm(4, out_channel)
+        self.norm2 = nn.GroupNorm(group, out_channel)
 
     def forward(self, x: Tensor) -> Tensor:
         x = functional.selu(self.norm1(self.conv1(x)), inplace=True)
@@ -156,7 +156,7 @@ class MultiHeadSelfAttention(Module):
 
 class MultiHeadSelfAttentionCV(Module):
     """
-    多头自注意力层，使用1x1卷积而非线性层进行投影
+    多头自注意力层，使用1x1卷积而非线性层进行投影，另外假定输入是图像形式的思维张量
     """
     head: int
     scale: float  # 缩放系数
@@ -176,22 +176,40 @@ class MultiHeadSelfAttentionCV(Module):
 
         self.scale = head_dim ** -0.5
         hidden_dim = head * head_dim  # 所有head的隐藏层加起来的维数
-        self.qkv = torch.nn.Conv2d(in_dim, head_dim * 3, 1, bias=False)
+        self.qkv = torch.nn.Conv2d(in_dim, hidden_dim * 3, 1, bias=False)
         self.out = torch.nn.Conv2d(hidden_dim, out_dim, 1)
 
     def forward(self, x: torch.Tensor):
         """
         :param x: 四维张量[batch, channel, x, y]
         """
-        _, _, x, y = x.shape  # 用于还原
+        _, _, w, h = x.shape  # 用于还原
 
-        q, k, v = self.qkv(x)
-        q, k, v = [einops.rearrange(v, "b(hc)xy -> bhc(xy)", h=self.head) for v in [q, k, v]]
+        q, k, v = self.qkv(x).chunk(3, dim=1)
+        q, k, v = [einops.rearrange(v, "b (h c) x y -> b h c (x y)", h=self.head) for v in [q, k, v]]
 
         # query与key内积
         q = q * self.scale  # 缩放
         score = torch.einsum("bhcd, bhnd -> bhcn", q, k)  # 每一个请求中每一个向量的相关性
         score = torch.nn.functional.softmax(score, dim=-1)  # 对于相关性进行归一化
         x = torch.einsum("bhcn, bhnv -> bhcv", score, v)
-        x = einops.rearrange(x, "bhc(xy) -> h(hc)xy", x=x, y=y)
+        x = einops.rearrange(x, "b h c (x y) -> b (h c) x y", x=w, y=h)
         return self.out(x)
+
+
+class ResBlock(Module):
+    """
+    残差块，包含两个3x3卷积块，卷积块内使用group normal
+    """
+    conv1: Module
+    conv2: Module
+    adjust: Module
+
+    def __init__(self, in_dim: int, out_dim: int, group: int = 8):
+        super().__init__()
+        self.conv1 = Conv1(in_dim, out_dim, group)
+        self.conv2 = Conv1(out_dim, out_dim, group)
+        self.adjust = torch.nn.Identity() if in_dim == out_dim else torch.nn.Conv2d(in_dim, out_dim, 1)
+
+    def forward(self, x: torch.Tensor):
+        return self.adjust(x) + self.conv2(self.conv1(x))
