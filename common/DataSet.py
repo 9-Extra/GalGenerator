@@ -22,6 +22,7 @@ class DiskDataSet(Dataset):
     def __len__(self):
         return len(self.files)
 
+
 class Cifar10DataSet(Dataset):
     device: torch.device
     data: torch.Tensor
@@ -35,7 +36,8 @@ class Cifar10DataSet(Dataset):
         # for i in range(100):
         #     cv2.imshow("Display", single_class_data[i, ...])
         #     cv2.waitKey()
-        single_class_data = numpy.ascontiguousarray(single_class_data[..., ::-1].transpose((0, 3, 1 ,2)).astype(numpy.single))
+        single_class_data = numpy.ascontiguousarray(
+            single_class_data[..., ::-1].transpose((0, 3, 1, 2)).astype(numpy.single))
         self.data = torch.from_numpy(single_class_data).to(device) * (2 / 255) - 1.0
 
     def __getitem__(self, index):

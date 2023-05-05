@@ -10,7 +10,7 @@ import torchsummary
 import torch.nn as nn
 
 # 超参数
-IMAGE_SIZE = (32, 32)
+IMAGE_SIZE = (160, 160)
 T = 1000  # 总层数
 BETA = torch.linspace(0.0001, 0.02, T, dtype=torch.float32)  # 每一层增加的噪声水平 forward process variances （实际上还要开方）
 ALPHA = 1.0 - BETA  # 相当于每层剩余的原图片比率（实际上还要开方）
@@ -52,54 +52,40 @@ def to_device(device):
 
 class Down(Module):
     """Downscaling with maxpool then double conv"""
-    conv1: Module
-    conv2: Module
-    mlp: Module
-    res: Module
+    res1: Module
+    res2: Module
+    down_sample: Module
 
     def __init__(self, in_channels, out_channels, time_embed_dim):
         super().__init__()
-        self.conv1 = Conv1(in_channels, out_channels)
-        self.conv2 = Conv1(out_channels, out_channels, active=False)
-        self.mlp = torch.nn.Linear(time_embed_dim, out_channels)
+        self.res1 = TimeEmbedResBlock(in_channels, out_channels, time_embed_dim)
+        self.res2 = TimeEmbedResBlock(out_channels, out_channels, time_embed_dim)
 
-        self.maxpool_conv = nn.Sequential(
-            nn.MaxPool2d(2),
-            Conv1(in_channels, out_channels),
-        )
-
-        self.res = torch.nn.Conv2d(in_channels, out_channels, 1)
+        self.down_sample = nn.MaxPool2d(2)
 
     def forward(self, x, embed):
-        x = torch.max_pool2d(x, 2)
-        h = self.conv1(x)
-        h = h + self.mlp(embed).view(embed.shape[0], -1, 1, 1)
-        h = self.conv2(h)
-        return torch.nn.functional.selu(h + self.res(x), True)
+        x1 = self.res1(x, embed)
+        x2 = self.res2(x1, embed)
+        return x1, x2, self.down_sample(x2)
 
 
 class Up(Module):
     """Upscaling then double conv"""
-    conv1: Module
-    conv2: Module
-    mlp: Module
-    res: Module
+    res1: Module
+    res2: Module
+    up_sample: Module
 
     def __init__(self, in_channels, out_channels, time_embed_dim):
         super().__init__()
-        self.up = nn.ConvTranspose2d(in_channels, in_channels // 2, kernel_size=2, stride=2)
-        self.conv1 = Conv1(in_channels, out_channels)
-        self.conv2 = Conv1(out_channels, out_channels, active=False)
-        self.mlp = torch.nn.Linear(time_embed_dim, out_channels)
-        self.res = torch.nn.Conv2d(in_channels, out_channels, 1)
+        self.res1 = TimeEmbedResBlock(in_channels + out_channels, out_channels, time_embed_dim)
+        self.res2 = TimeEmbedResBlock(in_channels + out_channels, out_channels, time_embed_dim)
+        self.up_sample = nn.ConvTranspose2d(in_channels, in_channels // 2, kernel_size=2, stride=2)
 
-    def forward(self, x1, x2, embed):
-        x1 = self.up(x1)
-        x = torch.cat([x2, x1], dim=1)
-        h = self.conv1(x)
-        h = h + self.mlp(embed).view(embed.shape[0], -1, 1, 1)
-        h = self.conv2(h)
-        return torch.nn.functional.selu(h + self.res(x), True)
+    def forward(self, x, x1, x2, embed):
+        x = self.up_sample(x)
+        x = self.res1(torch.cat([x, x1], dim=1), embed)
+        x = self.res2(torch.cat([x, x2], dim=1), embed)
+        return x
 
 
 class UNet(Module):
@@ -117,7 +103,7 @@ class UNet(Module):
         self.down4 = Down(256, 512, time_embed_dim)
 
         self.middle_res1 = TimeEmbedResBlock(512, 512, time_embed_dim)
-        self.middle_norm = torch.nn.LayerNorm([512, 2, 2])
+        self.middle_norm = torch.nn.LayerNorm([512, IMAGE_SIZE[0] // 16, IMAGE_SIZE[1] // 16])
         self.middle_attention = MultiHeadSelfAttentionCV(512, 512)
         self.middle_res2 = TimeEmbedResBlock(512, 512, time_embed_dim)
 
@@ -127,20 +113,31 @@ class UNet(Module):
         self.up4 = Up(64, 32, time_embed_dim)
 
     def forward(self, x, embed):
-        x1 = self.inc(x)
-        x2 = self.down1(x1, embed)
-        x3 = self.down2(x2, embed)
-        x4 = self.down3(x3, embed)
-        x5 = self.down4(x4, embed)
+        connect = []  # 传递的连接输出
 
-        x5 = self.middle_norm(self.middle_res1(x5, embed))
-        x5 = self.middle_attention(x5)
-        x5 = self.middle_res2(x5, embed)
+        x = self.inc(x)
 
-        x = self.up1(x5, x4, embed)
-        x = self.up2(x, x3, embed)
-        x = self.up3(x, x2, embed)
-        x = self.up4(x, x1, embed)
+        x1, x2, x = self.down1(x, embed)
+        connect.extend([x1, x2])
+        x1, x2, x = self.down2(x, embed)
+        connect.extend([x1, x2])
+        x1, x2, x = self.down3(x, embed)
+        connect.extend([x1, x2])
+        x1, x2, x = self.down4(x, embed)
+        connect.extend([x1, x2])
+
+        x = self.middle_norm(self.middle_res1(x, embed))
+        x = self.middle_attention(x)
+        x = self.middle_res2(x, embed)
+        
+        x2, x1 = connect.pop(), connect.pop()
+        x = self.up1(x, x1, x2, embed)
+        x2, x1 = connect.pop(), connect.pop()
+        x = self.up2(x, x1, x2, embed)
+        x2, x1 = connect.pop(), connect.pop()
+        x = self.up3(x, x1, x2, embed)
+        x2, x1 = connect.pop(), connect.pop()
+        x = self.up4(x, x1, x2, embed)
         return x
 
 
