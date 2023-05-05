@@ -1,5 +1,3 @@
-import math
-
 import einops
 import torch
 from torch import nn, Tensor
@@ -154,3 +152,46 @@ class MultiHeadSelfAttention(Module):
         x = torch.einsum("bhcn, bhnv -> bhcv", score, v)
         x = einops.rearrange(x, "bhcv -> h(hc)v")
         return self.out_mlp(x)
+
+
+class MultiHeadSelfAttentionCV(Module):
+    """
+    多头自注意力层，使用1x1卷积而非线性层进行投影
+    """
+    head: int
+    scale: float  # 缩放系数
+
+    qkv: Module  # 使用一个卷积层计算所有head的投影
+    out: Module  # 输出时也使用卷积进行投影
+
+    def __init__(self, in_dim: int, out_dim: int, head: int = 8, head_dim: int = 32):
+        """
+        :param in_dim: 输入的特征数
+        :param out_dim: 输出的特征数
+        :param head: head数
+        :param head_dim: 每个head的隐藏层向量的长度
+        """
+        super().__init__()
+        self.head = head
+
+        self.scale = head_dim ** -0.5
+        hidden_dim = head * head_dim  # 所有head的隐藏层加起来的维数
+        self.qkv = torch.nn.Conv2d(in_dim, head_dim * 3, 1, bias=False)
+        self.out = torch.nn.Conv2d(hidden_dim, out_dim, 1)
+
+    def forward(self, x: torch.Tensor):
+        """
+        :param x: 四维张量[batch, channel, x, y]
+        """
+        _, _, x, y = x.shape  # 用于还原
+
+        q, k, v = self.qkv(x)
+        q, k, v = [einops.rearrange(v, "b(hc)xy -> bhc(xy)", h=self.head) for v in [q, k, v]]
+
+        # query与key内积
+        q = q * self.scale  # 缩放
+        score = torch.einsum("bhcd, bhnd -> bhcn", q, k)  # 每一个请求中每一个向量的相关性
+        score = torch.nn.functional.softmax(score, dim=-1)  # 对于相关性进行归一化
+        x = torch.einsum("bhcn, bhnv -> bhcv", score, v)
+        x = einops.rearrange(x, "bhc(xy) -> h(hc)xy", x=x, y=y)
+        return self.out(x)
