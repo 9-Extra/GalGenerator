@@ -8,7 +8,7 @@ from torch.nn import Module, functional
 class Conv1(Module):
     def __init__(self, in_channel: int, out_channel: int, group: int = 4, active=True):
         super().__init__()
-        self.active = torch.nn.SELU(True) if active else torch.nn.Identity()
+        self.active = torch.nn.SiLU(True) if active else torch.nn.Identity()
 
         self.conv = nn.Conv2d(in_channel, out_channel, 3, padding=1, bias=True)
         self.norm = nn.GroupNorm(group, out_channel)
@@ -20,9 +20,8 @@ class Conv1(Module):
 
 # 2个 3x3卷积
 class Conv2(Module):
-    def __init__(self, in_channel: int, out_channel: int, group: int = 4, active=True):
+    def __init__(self, in_channel: int, out_channel: int, group: int = 4):
         super().__init__()
-        self.active = torch.nn.SELU(True) if active else torch.nn.Identity()
 
         self.conv1 = nn.Conv2d(in_channel, out_channel, 3, padding=1, bias=True)
         self.norm1 = nn.GroupNorm(group, out_channel)
@@ -30,8 +29,8 @@ class Conv2(Module):
         self.norm2 = nn.GroupNorm(group, out_channel)
 
     def forward(self, x: Tensor) -> Tensor:
-        x = functional.selu(self.norm1(self.conv1(x)), inplace=True)
-        x = self.active(self.norm2(self.conv2(x)))
+        x = functional.silu(self.norm1(self.conv1(x)), inplace=True)
+        x = functional.silu(self.norm2(self.conv2(x)), inplace=True)
         return x
 
 

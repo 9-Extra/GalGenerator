@@ -152,12 +152,12 @@ class Diffusion(Module):
         self.register_buffer("position_encoding", cal_position_encoding(total_timestep, image_size))
         position_encoding_size = self.position_encoding.shape[1]  # 位置编码的长度
 
-        time_embed_dim = position_encoding_size
+        time_embed_dim = position_encoding_size * 4
         self.mlp = torch.nn.Sequential(
             torch.nn.Linear(position_encoding_size, time_embed_dim),
-            torch.nn.SELU(),
+            torch.nn.SiLU(),
             torch.nn.Linear(time_embed_dim, time_embed_dim),
-            torch.nn.SELU(),
+            torch.nn.SiLU(),
         )
         # 内部就是个UNet
         self.unet = UNet(image_size, 3, time_embed_dim)
