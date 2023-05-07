@@ -6,3 +6,7 @@
 /DDPM/cifar10/
 /论文/
 /DDPM/result/
+__pycache__
+.ipynb_checkpoints
+/model
+
