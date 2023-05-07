@@ -3,7 +3,7 @@ import argparse
 
 import torch
 from torch.nn import Module
-from common.common_layers import Conv2, MultiHeadSelfAttentionCV, TimeEmbedResBlock
+from common.common_layers import MultiHeadSelfAttentionCV, TimeEmbedResBlock, ChannelDownSample, Conv1
 import torchsummary
 
 import torch.nn as nn
@@ -32,7 +32,7 @@ class Down(Module):
         self.res1 = TimeEmbedResBlock(in_channels, out_channels, time_embed_dim)
         self.res2 = TimeEmbedResBlock(out_channels, out_channels, time_embed_dim)
 
-        self.down_sample = nn.MaxPool2d(2)
+        self.down_sample = ChannelDownSample(out_channels, out_channels)
 
     def forward(self, x, embed):
         x1 = self.res1(x, embed)
@@ -50,7 +50,10 @@ class Up(Module):
         super().__init__()
         self.res1 = TimeEmbedResBlock(in_channels + out_channels, out_channels, time_embed_dim)
         self.res2 = TimeEmbedResBlock(in_channels + out_channels, out_channels, time_embed_dim)
-        self.up_sample = nn.ConvTranspose2d(in_channels, in_channels // 2, kernel_size=2, stride=2)
+        self.up_sample = torch.nn.Sequential(
+            torch.nn.Upsample(scale_factor=2, mode="nearest"),
+            torch.nn.Conv2d(out_channels, out_channels, 3, padding=1)
+        )
 
     def forward(self, x, x1, x2, embed):
         x = self.up_sample(x)
@@ -67,7 +70,7 @@ class UNet(Module):
 
     def __init__(self, image_size: int, n_channels: int, time_embed_dim: int):
         super(UNet, self).__init__()
-        self.inc = Conv2(n_channels, 32)
+        self.inc = torch.nn.Conv2d(n_channels, 32, 1)
         self.down1 = Down(32, 64, time_embed_dim)
         self.down2 = Down(64, 128, time_embed_dim)
         self.down3 = Down(128, 256, time_embed_dim)

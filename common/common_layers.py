@@ -155,7 +155,8 @@ class MultiHeadSelfAttention(Module):
 
 class MultiHeadSelfAttentionCV(Module):
     """
-    多头自注意力层，使用1x1卷积而非线性层进行投影，另外假定输入是图像形式的思维张量
+    多头自注意力层，使用1x1卷积而非线性层进行投影，另外假定输入是图像形式的四维张量
+    好像就是non local attention
     """
     head: int
     scale: float  # 缩放系数
@@ -239,3 +240,18 @@ class TimeEmbedResBlock(Module):
         h = h + einops.rearrange(self.mlp(time_emb), "b c -> b c 1 1")
         h = self.conv2(h)
         return self.adjust(x) + h
+
+
+class ChannelDownSample(Module):
+    """
+    通过将图像切成4块再叠到channel维，最后一个1x1卷积得到输出维数的下采样层
+    """
+    conv: Module
+
+    def __init__(self, in_dim: int, out_dim: int):
+        super().__init__()
+        self.conv = torch.nn.Conv2d(in_dim * 4, out_dim, 1)
+
+    def forward(self, x: torch.Tensor):
+        x = einops.rearrange(x, "b c (x s1) (y s2) -> b (c s1 s2) x y", s1=2, s2=2)
+        return self.conv(x)
