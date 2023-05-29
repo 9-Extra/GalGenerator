@@ -6,8 +6,6 @@ from torch.nn import Module
 from common.common_layers import MultiHeadSelfAttentionCV, TimeEmbedResBlock, ChannelDownSample, Conv1
 import torchsummary
 
-import torch.nn as nn
-
 
 # 将Diffusion模型输入的t信息编码到输入的图像tensor中，借用了transformer的位置编码方法
 def cal_position_encoding(time_step: int, image_size: int) -> torch.Tensor:
@@ -48,12 +46,12 @@ class Up(Module):
 
     def __init__(self, in_channels, out_channels, time_embed_dim):
         super().__init__()
-        self.res1 = TimeEmbedResBlock(in_channels + out_channels, out_channels, time_embed_dim)
-        self.res2 = TimeEmbedResBlock(in_channels + out_channels, out_channels, time_embed_dim)
         self.up_sample = torch.nn.Sequential(
             torch.nn.Upsample(scale_factor=2, mode="nearest"),
-            torch.nn.Conv2d(out_channels, out_channels, 3, padding=1)
+            torch.nn.Conv2d(in_channels, out_channels, 3, padding=1)
         )
+        self.res1 = TimeEmbedResBlock(in_channels + out_channels, out_channels, time_embed_dim)
+        self.res2 = TimeEmbedResBlock(in_channels + out_channels, out_channels, time_embed_dim)
 
     def forward(self, x, x1, x2, embed):
         x = self.up_sample(x)
@@ -136,7 +134,6 @@ class Diffusion(Module):
             image_size: int,
             total_timestep=1000,
             beta_schedule="linear",
-
     ):
         super().__init__()
         self.image_size = image_size
@@ -168,7 +165,7 @@ class Diffusion(Module):
         self.conv = torch.nn.Conv2d(32, 3, 1, bias=True)
 
     def forward(self, x: torch.Tensor, t: torch.Tensor):
-        embed = self.mlp(t)
+        embed = self.mlp(torch.index_select(self.position_encoding, 0, t))
         x = self.unet(x, embed)
         return self.conv(x)
 

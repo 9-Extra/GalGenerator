@@ -22,7 +22,7 @@ def _train(
 ):
     print("Start Training")
     for e in range(1, epoch + 1):
-        total_loss = 0.0
+        running_loss = []
         p = tqdm.tqdm(data, leave=True, file=sys.stdout)
         for batch in p:
             t = torch.randint(0, model.total_timestep, [data.batch_size], device=device, dtype=torch.int)  # 随机选一层[0..T)，比论文中的t小1
@@ -30,7 +30,7 @@ def _train(
             x_t, noise = model.forward_process(batch, t)
 
             optimizer.zero_grad()
-            output = model.forward(x_t, torch.index_select(model.position_encoding, 0, t))
+            output = model.forward(x_t, t)
 
             # for i in range(batch.shape[0]):
             #      print("Time: ", t[i].item())
@@ -39,18 +39,16 @@ def _train(
             #      cv2.imshow(f"Noise", noise.numpy(force=True).transpose((0, 2, 3, 1))[i, :, :, ::1])
             #      cv2.imshow(f"Predicted", output.numpy(force=True).transpose((0, 2, 3, 1))[i, :, :, ::1])
             #      cv2.waitKey()
-
-            loss = torch.nn.functional.mse_loss(noise, output)  # 优化估计出的噪声
+            loss = torch.nn.functional.l1_loss(noise, output)  # l1 损失
+            # loss = torch.nn.functional.mse_loss(noise, output)  # l2 损失
             loss.backward()
             optimizer.step()
 
-            l = loss.item()
-            total_loss += l
-            p.set_postfix({"loss": l})
+            running_loss.append(loss)  # 保存引用，不获取loss的值以降低传输延迟
 
         pass  # 一个epoch结束
 
-        mean_loss = total_loss / len(data)
+        mean_loss = sum(l.item() for l in running_loss) / len(data)
         writer.add_scalar("mean-loss", mean_loss, e)
 
         print(f"Finished epoch {e}/{epoch}, mean-loss: {mean_loss}")
@@ -86,7 +84,6 @@ def run(
 
     # 预热
     t = torch.randint(0, model.total_timestep, [batch_size], device=device, dtype=torch.int)
-    t = torch.index_select(model.position_encoding, 0, t)
     model.forward(torch.rand([batch_size, 3, model.image_size, model.image_size], device=device), t)
 
     # 输出到tensorboard
