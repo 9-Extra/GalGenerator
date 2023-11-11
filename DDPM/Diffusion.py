@@ -1,10 +1,11 @@
 # 扩散模型
 import argparse
 
+import thop
 import torch
 from torch.nn import Module
-from common.common_layers import MultiHeadSelfAttentionCV, TimeEmbedResBlock, ChannelDownSample, Conv1
-import torchsummary
+from common.common_layers import MultiHeadSelfAttentionCV, TimeEmbedResBlock, ChannelDownSample, Conv1, \
+    LinearAttentionCV
 
 
 # 将Diffusion模型输入的t信息编码到输入的图像tensor中，借用了transformer的位置编码方法
@@ -27,14 +28,21 @@ class Down(Module):
 
     def __init__(self, in_channels, out_channels, time_embed_dim):
         super().__init__()
-        self.res1 = TimeEmbedResBlock(in_channels, out_channels, time_embed_dim)
-        self.res2 = TimeEmbedResBlock(out_channels, out_channels, time_embed_dim)
+        self.res1 = TimeEmbedResBlock(in_channels, in_channels, time_embed_dim)
+        self.res2 = TimeEmbedResBlock(in_channels, in_channels, time_embed_dim)
 
-        self.down_sample = ChannelDownSample(out_channels, out_channels)
+        self.attention = torch.nn.Sequential(
+            torch.nn.GroupNorm(1, in_channels),
+            LinearAttentionCV(in_channels, in_channels),
+            torch.nn.GroupNorm(1, in_channels),
+        )
+
+        self.down_sample = ChannelDownSample(in_channels, out_channels)
 
     def forward(self, x, embed):
         x1 = self.res1(x, embed)
-        x2 = self.res2(x1, embed)
+        x = self.res2(x1, embed)
+        x2 = x + self.attention(x)
         return x1, x2, self.down_sample(x2)
 
 
@@ -46,17 +54,26 @@ class Up(Module):
 
     def __init__(self, in_channels, out_channels, time_embed_dim):
         super().__init__()
+
         self.up_sample = torch.nn.Sequential(
             torch.nn.Upsample(scale_factor=2, mode="nearest"),
             torch.nn.Conv2d(in_channels, out_channels, 3, padding=1)
         )
-        self.res1 = TimeEmbedResBlock(in_channels + out_channels, out_channels, time_embed_dim)
-        self.res2 = TimeEmbedResBlock(in_channels + out_channels, out_channels, time_embed_dim)
+
+        self.res1 = TimeEmbedResBlock(out_channels + out_channels, out_channels, time_embed_dim)
+        self.res2 = TimeEmbedResBlock(out_channels + out_channels, out_channels, time_embed_dim)
+
+        self.attention = torch.nn.Sequential(
+            torch.nn.GroupNorm(1, out_channels),
+            LinearAttentionCV(out_channels, out_channels),
+            torch.nn.GroupNorm(1, out_channels),
+        )
 
     def forward(self, x, x1, x2, embed):
         x = self.up_sample(x)
         x = self.res1(torch.cat([x, x1], dim=1), embed)
         x = self.res2(torch.cat([x, x2], dim=1), embed)
+        x = x + self.attention(x)
         return x
 
 
@@ -68,8 +85,8 @@ class UNet(Module):
 
     def __init__(self, image_size: int, n_channels: int, time_embed_dim: int):
         super(UNet, self).__init__()
-        self.inc = torch.nn.Conv2d(n_channels, 32, 1)
-        self.down1 = Down(32, 64, time_embed_dim)
+        self.inc = torch.nn.Conv2d(n_channels, 64, 7, padding=3)
+        self.down1 = Down(64, 64, time_embed_dim)
         self.down2 = Down(64, 128, time_embed_dim)
         self.down3 = Down(128, 256, time_embed_dim)
         self.down4 = Down(256, 512, time_embed_dim)
@@ -82,12 +99,17 @@ class UNet(Module):
         self.up1 = Up(512, 256, time_embed_dim)
         self.up2 = Up(256, 128, time_embed_dim)
         self.up3 = Up(128, 64, time_embed_dim)
-        self.up4 = Up(64, 32, time_embed_dim)
+        self.up4 = Up(64, 64, time_embed_dim)
+
+        self.final_res_block = TimeEmbedResBlock(128, 64, time_embed_dim)
+
+        self.final_conv = torch.nn.Conv2d(64, 3, 1)
 
     def forward(self, x, embed):
         connect = []  # 传递的连接输出
 
         x = self.inc(x)
+        r = x.clone()
 
         x1, x2, x = self.down1(x, embed)
         connect.extend([x1, x2])
@@ -110,7 +132,10 @@ class UNet(Module):
         x = self.up3(x, x1, x2, embed)
         x2, x1 = connect.pop(), connect.pop()
         x = self.up4(x, x1, x2, embed)
-        return x
+
+        x = self.final_res_block(torch.cat([x, r], dim=1), embed)
+
+        return self.final_conv(x)
 
 
 class Diffusion(Module):
@@ -162,12 +187,10 @@ class Diffusion(Module):
         # 内部就是个UNet
         self.unet = UNet(image_size, 3, time_embed_dim)
 
-        self.conv = torch.nn.Conv2d(32, 3, 1, bias=True)
-
     def forward(self, x: torch.Tensor, t: torch.Tensor):
         embed = self.mlp(torch.index_select(self.position_encoding, 0, t))
         x = self.unet(x, embed)
-        return self.conv(x)
+        return x
 
     def forward_process(self, x_0: torch.Tensor, t: torch.Tensor) -> (torch.Tensor, torch.Tensor):
         """
@@ -206,8 +229,11 @@ def run(
     )
     model.to(device).train()
 
-    torchsummary.summary(model, [[3, image_size, image_size], [model.position_encoding.shape[1]]],
-                         batch_size=batch_size)
+    input_x = torch.randn(batch_size, 3, image_size, image_size, device=device)
+    input_t = torch.randint(0, model.total_timestep, [batch_size], device=device, dtype=torch.int)
+    flops, params = thop.profile(model, inputs=(input_x, input_t))
+    print("FLOPs=", str(flops / 1e9) + '{}'.format("G"))
+    print("params=", str(params / 1e6) + '{}'.format("M"))
 
     pass
 

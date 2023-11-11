@@ -197,6 +197,60 @@ class MultiHeadSelfAttentionCV(Module):
         return self.out(x)
 
 
+class LinearAttentionCV(Module):
+    """
+    线性多头注意力层，使用1x1卷积而非线性层进行投影，另外假定输入是图像形式的四维张量
+    相关性的计算方法为Attention(k, q, v) = softmax(q, dim = 2) * (softmax(k, dim = 1).T * v)
+    参考https://zhuanlan.zhihu.com/p/458859501
+    """
+    head: int
+    scale: float  # 缩放系数
+
+    qkv: Module  # 使用一个卷积层计算所有head的投影
+    out: Module  # 输出时也使用卷积进行投影
+
+    def __init__(self, in_dim: int, out_dim: int, head: int = 8, head_dim: int = 32):
+        """
+        :param in_dim: 输入的特征数
+        :param out_dim: 输出的特征数
+        :param head: head数
+        :param head_dim: 每个head的隐藏层向量的长度
+        """
+        super().__init__()
+        self.head = head
+
+        self.scale = head_dim ** -0.5  # 1 / sqrt(head_dim)
+        hidden_dim = head * head_dim  # 所有head的隐藏层加起来的维数
+        self.qkv = torch.nn.Conv2d(in_dim, hidden_dim * 3, 1, bias=False)
+        self.out = torch.nn.Conv2d(hidden_dim, out_dim, 1)
+
+    def forward(self, x: torch.Tensor):
+        """
+        :param x: 四维张量[batch, channel, x, y]
+        """
+        _, _, w, h = x.shape  # 用于还原
+
+        q, k, v = self.qkv(x).chunk(3, dim=1)
+        q, k, v = [einops.rearrange(v, "b (h c) x y -> b h (x y) c", h=self.head) for v in [q, k, v]]
+        q: Tensor
+        k: Tensor
+        v: Tensor
+
+        q = q.softmax(dim=-2)
+        k = k.softmax(dim=-1)
+
+        # 缩放
+        q = q * self.scale
+        v = v / (w * h)
+
+        # softmax(k).T * v
+        mid = torch.einsum("bh d c, bh d e -> bh c e", k, v)
+        x = torch.einsum("bh d c, bh c e -> bh d e", q, mid)
+
+        x = einops.rearrange(x, "b h (x y) c -> b (h c) x y", x=w, y=h)
+        return self.out(x)
+
+
 class ResBlock(Module):
     """
     残差块，包含两个3x3卷积块，卷积块内使用group normal

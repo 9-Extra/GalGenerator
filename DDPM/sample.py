@@ -21,6 +21,8 @@ def _tensor_to_image(t: torch.Tensor) -> numpy.ndarray:
 
 def sample(diffusion: Diffusion.Diffusion, image_size: int, count: int, device: torch.device) -> numpy.ndarray:
     alphas_cumprod_prev = torch.nn.functional.pad(diffusion.alpha_cumprod[:-1], (1, 0), value=1.)
+    alpha_cumprod_sqrt_rev = 1.0 / diffusion.alpha_cumprod_sqrt
+    sqrt_recipm1_alphas_cumprod = torch.sqrt(1.0 / diffusion.alpha_cumprod - 1.0)
     posterior_variance = (diffusion.beta * (1. - alphas_cumprod_prev) / (1. - diffusion.alpha_cumprod)).clamp(
         min=1e-20)
     posterior_mean_coef1 = diffusion.beta * torch.sqrt(alphas_cumprod_prev) / (1. - diffusion.alpha_cumprod)
@@ -39,8 +41,7 @@ def sample(diffusion: Diffusion.Diffusion, image_size: int, count: int, device: 
         # cv2.imshow("noise", noise_predicted.numpy(force=True).transpose((0, 2, 3, 1))[0, :, :, ::1])
         # cv2.waitKey()
 
-        x_start = 1.0 / diffusion.alpha_cumprod_sqrt[t] * x - torch.sqrt(
-            1.0 / diffusion.alpha_cumprod[t] - 1.0) * noise_predicted
+        x_start = alpha_cumprod_sqrt_rev[t] * x - sqrt_recipm1_alphas_cumprod[t] * noise_predicted
         x_start = x_start.clip(-1.0, 1.0)
         posterior_mean = posterior_mean_coef1[t] * x_start + posterior_mean_coef2[t] * x
         # print(posterior_mean_coef1[t].item(), posterior_mean_coef2[t].item(), posterior_variance[t].item())
