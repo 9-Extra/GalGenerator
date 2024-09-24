@@ -12,6 +12,7 @@ class Conv1(Module):
 
         self.conv = nn.Conv2d(in_channel, out_channel, 3, padding=1, bias=True)
         self.norm = nn.GroupNorm(group, out_channel)
+        # self.norm = nn.Identity()
 
     def forward(self, x: Tensor) -> Tensor:
         x = self.active(self.norm(self.conv(x)))
@@ -291,7 +292,7 @@ class TimeEmbedResBlock(Module):
 
     def forward(self, x: torch.Tensor, time_emb: torch.Tensor):
         h = self.conv1(x)
-        h = h + einops.rearrange(self.mlp(time_emb), "b c -> b c 1 1")
+        h = h + self.mlp(time_emb).unsqueeze(-1).unsqueeze(-1)
         h = self.conv2(h)
         return self.adjust(x) + h
 

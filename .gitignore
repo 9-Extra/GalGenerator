@@ -1,12 +1,5 @@
-*.npy
-*.zip
-/DDPM/model/
-/DDPM/data/
-/DDPM/run/
-/DDPM/cifar10/
 /论文/
-/DDPM/result/
-__pycache__
-.ipynb_checkpoints
-/model
+/run/
+__pycache__/
+
 
