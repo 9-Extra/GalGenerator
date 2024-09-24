@@ -15,7 +15,7 @@ if __name__ == '__main__':
     
     sample_parser = subparsers.add_parser("sample")
     sample_parser.add_argument('weight', type=str)
-    sample_parser.add_argument('--image_size', type=int)
+    sample_parser.add_argument('--image_size', type=int, required=True)
     sample_parser.add_argument('--save_dir', type=str, default='./run/result')
     sample_parser.add_argument('--count', type=int, default=4)
     sample_parser.add_argument('--device', type=str, default="cuda")

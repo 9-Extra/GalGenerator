@@ -6,7 +6,7 @@ from torch.nn import Module, functional
 
 # 3x3卷积
 class Conv1(Module):
-    def __init__(self, in_channel: int, out_channel: int, group: int = 4, active=True):
+    def __init__(self, in_channel: int, out_channel: int, group: int = 32, active=True):
         super().__init__()
         self.active = torch.nn.SiLU(True) if active else torch.nn.Identity()
 
@@ -21,7 +21,7 @@ class Conv1(Module):
 
 # 2个 3x3卷积
 class Conv2(Module):
-    def __init__(self, in_channel: int, out_channel: int, group: int = 4):
+    def __init__(self, in_channel: int, out_channel: int, group: int = 32):
         super().__init__()
 
         self.conv1 = nn.Conv2d(in_channel, out_channel, 3, padding=1, bias=True)
@@ -260,7 +260,7 @@ class ResBlock(Module):
     conv2: Module
     adjust: Module
 
-    def __init__(self, in_dim: int, out_dim: int, group: int = 8):
+    def __init__(self, in_dim: int, out_dim: int, group: int = 32):
         super().__init__()
         self.conv1 = Conv1(in_dim, out_dim, group)
         self.conv2 = Conv1(out_dim, out_dim, group)
@@ -281,7 +281,7 @@ class TimeEmbedResBlock(Module):
     mlp: Module
     adjust: Module
 
-    def __init__(self, in_dim: int, out_dim: int, time_embed_dim: int, group: int = 8):
+    def __init__(self, in_dim: int, out_dim: int, time_embed_dim: int, group: int = 32):
         super().__init__()
         self.out_dim = out_dim
 

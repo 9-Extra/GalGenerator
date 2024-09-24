@@ -1,8 +1,10 @@
 # 扩散模型
 import argparse
+import math
 
 import torch
 from torch.nn import Module
+import tqdm
 
 from common.common_layers import LinearAttentionCV, MultiHeadSelfAttentionCV, TimeEmbedResBlock
 
@@ -17,14 +19,44 @@ class RMSNorm(Module):
         return torch.nn.functional.normalize(x, dim=1) * self.g * self.scale
 
 
-# 将Diffusion模型输入的t信息编码到输入的图像tensor中，借用了transformer的位置编码方法
-def cal_position_encoding(time_step: int, image_size: int) -> torch.Tensor:
-    d = image_size * 3
-    encoding = torch.empty((time_step, d), dtype=torch.float32)
-    omega = 10000 * torch.exp(torch.arange(0, d, 2, dtype=torch.float32) / -d)
+class SinusoidalPosEmb(Module):
+    def __init__(self, dim: int, theta=10000):
+        super().__init__()
+        self.dim = dim
+        self.theta = theta
+
+    def forward(self, x):
+        device = x.device
+        half_dim = self.dim // 2
+        emb = math.log(self.theta) / (half_dim - 1)
+        emb = torch.exp(torch.arange(half_dim, device=device) * -emb)
+        emb = x[:, None] * emb[None, :]
+        emb = torch.cat((emb.sin(), emb.cos()), dim=-1)
+        return emb
+    
+    
+# def cal_position_encoding(time_step: int, emb_dim: int) -> torch.Tensor:
+#     """
+#     将Diffusion模型输入的t信息编码到输入的图像tensor中，借用了transformer的位置编码方法
+#     返回的位置编码形状为[time, emb_dim]，对每个时间都有一个长度为emb_dim的向量
+#     """
+#     # encoding = torch.empty((time_step, emb_dim), dtype=torch.float32)
+#     # e = 2 * math.log(10000) / emb_dim # omega的指数部分
+#     # omega = torch.exp(torch.arange(emb_dim // 2, dtype=torch.float32) * -e)
+#     # t_series = torch.arange(time_step, device=omega.device)
+#     # omega_t = t_series[:, None] * omega[None, :]
+#     # encoding[:, 0::2] = torch.sin(omega_t)  # 偶数位
+#     # encoding[:, 1::2] = torch.cos(omega_t)  # 奇数位    
+#     emb = SinusoidalPosEmb(emb_dim)
+#     encoding = emb(torch.arange(time_step))
+#     return encoding
+
+def cal_position_encoding(time_step: int, emb_dim: int) -> torch.Tensor:
+    encoding = torch.empty((time_step, emb_dim), dtype=torch.float32)
+    omega = 10000 * torch.exp(torch.arange(0, emb_dim, 2, dtype=torch.float32) / -emb_dim)
     for t in range(time_step):
         encoding[t, 0::2] = torch.sin(omega * (t + 1))  # 偶数位
-        encoding[t, 1::2] = torch.sin(omega * (t + 1))  # 奇数位
+        encoding[t, 1::2] = torch.cos(omega * (t + 1))  # 奇数位
 
     return encoding
 
@@ -41,9 +73,9 @@ class Down(Module):
         self.res2 = TimeEmbedResBlock(in_channels, in_channels, time_embed_dim)
 
         self.attention = torch.nn.Sequential(
-            torch.nn.GroupNorm(1, in_channels),
+            torch.nn.GroupNorm(32, in_channels),
             LinearAttentionCV(in_channels, in_channels),
-            torch.nn.GroupNorm(1, in_channels),
+            torch.nn.GroupNorm(32, in_channels),
         )
 
         self.down_sample = torch.nn.Sequential(
@@ -76,9 +108,9 @@ class Up(Module):
         self.res2 = TimeEmbedResBlock(out_channels + out_channels, out_channels, time_embed_dim)
 
         self.attention = torch.nn.Sequential(
-            torch.nn.GroupNorm(1, out_channels),
+            torch.nn.GroupNorm(32, out_channels),
             LinearAttentionCV(out_channels, out_channels),
-            torch.nn.GroupNorm(1, out_channels),
+            torch.nn.GroupNorm(32, out_channels),
         )
 
     def forward(self, x, x1, x2, embed):
@@ -186,10 +218,11 @@ class Diffusion(Module):
         self.register_buffer("alpha_cumprod", alpha_cumprod)
         self.register_buffer("alpha_cumprod_sqrt", torch.sqrt(alpha_cumprod))
         self.register_buffer("one_minus_alpha_cumprod_sqrt", 1.0 - self.alpha_cumprod_sqrt)
-        self.register_buffer("position_encoding", cal_position_encoding(total_timestep, image_size))
+        self.register_buffer("position_encoding", cal_position_encoding(total_timestep, image_size * 8))
         position_encoding_size = self.position_encoding.shape[1]  # 位置编码的长度
 
-        time_embed_dim = position_encoding_size * 4
+        time_embed_dim = position_encoding_size * 2
+        # 先对位置编码使用mlp进行映射
         self.mlp = torch.nn.Sequential(
             torch.nn.Linear(position_encoding_size, time_embed_dim),
             torch.nn.SiLU(),
@@ -218,6 +251,42 @@ class Diffusion(Module):
         x_t = alpha_over_line_sqrt_t * x_0 + one_sub_alpha_over_line_sqrt_t * noise
 
         return x_t, noise
+    
+    @torch.no_grad()
+    def sample(self, batch_size: int) -> torch.Tensor:
+        """
+        采样图像，一次生成batch_size个，得到的图像像素取值范围为[-1, 1]，还需要再映射一下
+        """
+        device = next(self.parameters()).device
+        
+        alphas_cumprod_prev = torch.nn.functional.pad(self.alpha_cumprod[:-1], (1, 0), value=1.)
+        alpha_cumprod_sqrt_rev = 1.0 / self.alpha_cumprod_sqrt
+        sqrt_recipm1_alphas_cumprod = torch.sqrt(1.0 / self.alpha_cumprod - 1.0)
+        # 后验高斯分布的方差
+        posterior_variance = (self.beta * (1 - alphas_cumprod_prev) / (1 - self.alpha_cumprod)).clamp(
+            min=1e-20)
+        # 后验高斯分布均值的两个系数
+        posterior_mean_coef1 = self.beta * torch.sqrt(alphas_cumprod_prev) / (1 - self.alpha_cumprod)
+        posterior_mean_coef2 = (1 - alphas_cumprod_prev) * self.alpha_sqrt / (1 - self.alpha_cumprod)
+
+        input_size = (batch_size, 3, self.image_size, self.image_size)
+        x = torch.randn(input_size, device=device)  # 从高斯噪声开始
+        for t in tqdm.tqdm(reversed(range(0, self.total_timestep)), total=self.total_timestep, desc="采样图像"):
+            # 前向过程
+            z_noise = torch.randn(input_size, device=device) if t != 0 else torch.zeros(input_size, device=device)
+            batch_t: torch.Tensor = torch.full((batch_size,), t, device=device)
+            noise_predicted = self.forward(x, batch_t)  # 预测出的噪声
+
+            x_start = alpha_cumprod_sqrt_rev[t] * x - sqrt_recipm1_alphas_cumprod[t] * noise_predicted
+            x_start = x_start.clip_(-1.0, 1.0)
+            posterior_mean = posterior_mean_coef1[t] * x_start + posterior_mean_coef2[t] * x
+    
+            pred_img = posterior_mean + torch.sqrt(input=posterior_variance[t]) * z_noise
+            x = pred_img
+
+        pass
+
+        return x.clip_(-1.0, 1.0)
 
     @staticmethod
     def _cal_beta(timestep: int, beta_schedule) -> torch.Tensor:
