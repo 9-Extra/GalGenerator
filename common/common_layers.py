@@ -287,12 +287,13 @@ class TimeEmbedResBlock(Module):
 
         self.conv1 = Conv1(in_dim, out_dim, group)
         self.conv2 = Conv1(out_dim, out_dim, group)
-        self.mlp = torch.nn.Linear(time_embed_dim, out_dim)
+        self.mlp = torch.nn.Linear(time_embed_dim, out_dim * 2)
         self.adjust = torch.nn.Identity() if in_dim == out_dim else torch.nn.Conv2d(in_dim, out_dim, 1)
 
     def forward(self, x: torch.Tensor, time_emb: torch.Tensor):
         h = self.conv1(x)
-        h = h + self.mlp(time_emb).unsqueeze(-1).unsqueeze(-1)
+        scale, shift = self.mlp(time_emb).unsqueeze_(-1).unsqueeze_(-1).chunk(2, dim=1)
+        h = h * (scale + 1) + shift
         h = self.conv2(h)
         return self.adjust(x) + h
 

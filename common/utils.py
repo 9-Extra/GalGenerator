@@ -2,7 +2,7 @@ import os
 
 def auto_increase_dir(root: str) -> str:
     if not os.path.isdir(root):
-        os.mkdir(root)
+        os.makedirs(root)
 
     for i in range(0, 1000):
         dir_name = os.path.join(root, str(i))

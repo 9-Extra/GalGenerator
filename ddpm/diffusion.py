@@ -34,35 +34,26 @@ class SinusoidalPosEmb(Module):
         emb = torch.cat((emb.sin(), emb.cos()), dim=-1)
         return emb
     
-    
-# def cal_position_encoding(time_step: int, emb_dim: int) -> torch.Tensor:
-#     """
-#     将Diffusion模型输入的t信息编码到输入的图像tensor中，借用了transformer的位置编码方法
-#     返回的位置编码形状为[time, emb_dim]，对每个时间都有一个长度为emb_dim的向量
-#     """
-#     # encoding = torch.empty((time_step, emb_dim), dtype=torch.float32)
-#     # e = 2 * math.log(10000) / emb_dim # omega的指数部分
-#     # omega = torch.exp(torch.arange(emb_dim // 2, dtype=torch.float32) * -e)
-#     # t_series = torch.arange(time_step, device=omega.device)
-#     # omega_t = t_series[:, None] * omega[None, :]
-#     # encoding[:, 0::2] = torch.sin(omega_t)  # 偶数位
-#     # encoding[:, 1::2] = torch.cos(omega_t)  # 奇数位    
-#     emb = SinusoidalPosEmb(emb_dim)
-#     encoding = emb(torch.arange(time_step))
-#     return encoding
 
+@torch.no_grad()
 def cal_position_encoding(time_step: int, emb_dim: int) -> torch.Tensor:
+    """
+    将Diffusion模型输入的t信息编码到输入的图像tensor中，借用了transformer的位置编码方法
+    返回的位置编码形状为[time, emb_dim]，对每个时间都有一个长度为emb_dim的向量
+    """
     encoding = torch.empty((time_step, emb_dim), dtype=torch.float32)
-    omega = 10000 * torch.exp(torch.arange(0, emb_dim, 2, dtype=torch.float32) / -emb_dim)
-    for t in range(time_step):
-        encoding[t, 0::2] = torch.sin(omega * (t + 1))  # 偶数位
-        encoding[t, 1::2] = torch.cos(omega * (t + 1))  # 奇数位
-
+    e = 2 / emb_dim * torch.arange(emb_dim // 2, dtype=torch.float32) # omega的指数部分
+    omega = 10000 ** (-e)
+    t_series = torch.arange(time_step)
+    omega_t = t_series[:, None] * omega[None, :]
+    encoding[:, 0::2] = torch.sin(omega_t)  # 偶数位
+    encoding[:, 1::2] = torch.cos(omega_t)  # 奇数位    
+    # emb = SinusoidalPosEmb(emb_dim)
+    # encoding = emb(torch.arange(time_step))
     return encoding
 
 
 class Down(Module):
-    """Downscaling with maxpool then double conv"""
     res1: Module
     res2: Module
     down_sample: Module
@@ -72,11 +63,11 @@ class Down(Module):
         self.res1 = TimeEmbedResBlock(in_channels, in_channels, time_embed_dim)
         self.res2 = TimeEmbedResBlock(in_channels, in_channels, time_embed_dim)
 
-        self.attention = torch.nn.Sequential(
-            torch.nn.GroupNorm(32, in_channels),
-            LinearAttentionCV(in_channels, in_channels),
-            torch.nn.GroupNorm(32, in_channels),
-        )
+        # self.attention = torch.nn.Sequential(
+        #     torch.nn.GroupNorm(32, in_channels),
+        #     LinearAttentionCV(in_channels, in_channels),
+        #     torch.nn.GroupNorm(32, in_channels),
+        # )
 
         self.down_sample = torch.nn.Sequential(
             torch.nn.Conv2d(in_channels, out_channels, 3, 2, 1),
@@ -86,7 +77,7 @@ class Down(Module):
     def forward(self, x, embed):
         x1 = self.res1(x, embed)
         x = self.res2(x1, embed)
-        x2 = x + self.attention(x)
+        x2 = x # + self.attention(x)
         return x1, x2, self.down_sample(x)
 
 
@@ -107,17 +98,17 @@ class Up(Module):
         self.res1 = TimeEmbedResBlock(out_channels + out_channels, out_channels, time_embed_dim)
         self.res2 = TimeEmbedResBlock(out_channels + out_channels, out_channels, time_embed_dim)
 
-        self.attention = torch.nn.Sequential(
-            torch.nn.GroupNorm(32, out_channels),
-            LinearAttentionCV(out_channels, out_channels),
-            torch.nn.GroupNorm(32, out_channels),
-        )
+        # self.attention = torch.nn.Sequential(
+        #     torch.nn.GroupNorm(32, out_channels),
+        #     LinearAttentionCV(out_channels, out_channels),
+        #     torch.nn.GroupNorm(32, out_channels),
+        # )
 
     def forward(self, x, x1, x2, embed):
         x = self.up_sample(x)
         x = self.res1(torch.cat([x, x1], dim=1), embed)
         x = self.res2(torch.cat([x, x2], dim=1), embed)
-        x = x + self.attention(x)
+        x = x # + self.attention(x)
         return x
 
 
@@ -165,7 +156,7 @@ class UNet(Module):
         connect.extend([x1, x2])
 
         x = self.middle_norm(self.middle_res1(x, embed))
-        x = self.middle_attention(x)
+        # x = self.middle_attention(x)
         x = self.middle_res2(x, embed)
 
         x2, x1 = connect.pop(), connect.pop()
@@ -218,10 +209,10 @@ class Diffusion(Module):
         self.register_buffer("alpha_cumprod", alpha_cumprod)
         self.register_buffer("alpha_cumprod_sqrt", torch.sqrt(alpha_cumprod))
         self.register_buffer("one_minus_alpha_cumprod_sqrt", 1.0 - self.alpha_cumprod_sqrt)
-        self.register_buffer("position_encoding", cal_position_encoding(total_timestep, image_size * 8))
+        self.register_buffer("position_encoding", cal_position_encoding(total_timestep, 16))
         position_encoding_size = self.position_encoding.shape[1]  # 位置编码的长度
 
-        time_embed_dim = position_encoding_size * 2
+        time_embed_dim = 64 * 4
         # 先对位置编码使用mlp进行映射
         self.mlp = torch.nn.Sequential(
             torch.nn.Linear(position_encoding_size, time_embed_dim),
