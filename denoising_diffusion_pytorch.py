@@ -1,7 +1,6 @@
 import math
 import os
 from functools import partial
-from collections import namedtuple
 from typing import Optional
 
 import cv2
@@ -17,10 +16,6 @@ from einops.layers.torch import Rearrange
 from tqdm.auto import tqdm
 
 from common import DataSet, utils
-# constants
-
-ModelPrediction = namedtuple('ModelPrediction', ['pred_noise', 'pred_x_start'])
-
 
 # helpers functions
 
@@ -118,23 +113,6 @@ class SinusoidalPosEmb(Module):
         emb = torch.cat((emb.sin(), emb.cos()), dim=-1)
         return emb
 
-
-class RandomOrLearnedSinusoidalPosEmb(Module):
-    """ following @crowsonkb 's lead with random (learned optional) sinusoidal pos emb """
-    """ https://github.com/crowsonkb/v-diffusion-jax/blob/master/diffusion/models/danbooru_128.py#L8 """
-
-    def __init__(self, dim, is_random=False):
-        super().__init__()
-        assert dim // 2 == 0
-        half_dim = dim // 2
-        self.weights = nn.Parameter(torch.randn(half_dim), requires_grad=not is_random)
-
-    def forward(self, x):
-        x = rearrange(x, 'b -> b 1')
-        freqs = x * rearrange(self.weights, 'd -> 1 d') * 2 * math.pi
-        fouriered = torch.cat((freqs.sin(), freqs.cos()), dim=-1)
-        fouriered = torch.cat((x, fouriered), dim=-1)
-        return fouriered
 
 
 # building block modules
@@ -318,14 +296,10 @@ class Unet(Module):
             dim_mults=(1, 2, 4, 8),
             channels=3,
             learned_variance=False,
-            learned_sinusoidal_cond=False,
-            random_fourier_features=False,
-            learned_sinusoidal_dim=16,
             sinusoidal_pos_emb_theta=10000,
             attn_dim_head=32,
             attn_heads=4,
             full_attn=None,  # defaults to full attention only for inner most layer
-            flash_attn=False
     ):
         super().__init__()
 
@@ -343,15 +317,8 @@ class Unet(Module):
         # time embeddings
 
         time_dim = dim * 4
-
-        self.random_or_learned_sinusoidal_cond = learned_sinusoidal_cond or random_fourier_features
-
-        if self.random_or_learned_sinusoidal_cond:
-            sinu_pos_emb = RandomOrLearnedSinusoidalPosEmb(learned_sinusoidal_dim, random_fourier_features)
-            fourier_dim = learned_sinusoidal_dim + 1
-        else:
-            sinu_pos_emb = SinusoidalPosEmb(dim, theta=sinusoidal_pos_emb_theta)
-            fourier_dim = dim
+        sinu_pos_emb = SinusoidalPosEmb(dim, theta=sinusoidal_pos_emb_theta)
+        fourier_dim = dim
 
         self.time_mlp = nn.Sequential(
             sinu_pos_emb,
@@ -372,8 +339,6 @@ class Unet(Module):
 
         assert len(full_attn) == len(dim_mults)
 
-        FullAttention = partial(Attention, flash=flash_attn)
-
         # layers
 
         self.downs = ModuleList([])
@@ -384,7 +349,7 @@ class Unet(Module):
                 zip(in_out, full_attn, attn_heads, attn_dim_head)):
             is_last = ind >= (num_resolutions - 1)
 
-            attn_klass = FullAttention if layer_full_attn else LinearAttention
+            attn_klass = Attention if layer_full_attn else LinearAttention
 
             self.downs.append(ModuleList([
                 ResnetBlock(dim_in, dim_in, time_emb_dim=time_dim),
@@ -395,14 +360,14 @@ class Unet(Module):
 
         mid_dim = dims[-1]
         self.mid_block1 = ResnetBlock(mid_dim, mid_dim, time_emb_dim=time_dim)
-        self.mid_attn = FullAttention(mid_dim, heads=attn_heads[-1], dim_head=attn_dim_head[-1])
+        self.mid_attn = Attention(mid_dim, heads=attn_heads[-1], dim_head=attn_dim_head[-1])
         self.mid_block2 = ResnetBlock(mid_dim, mid_dim, time_emb_dim=time_dim)
 
         for ind, ((dim_in, dim_out), layer_full_attn, layer_attn_heads, layer_attn_dim_head) in enumerate(
                 zip(*map(reversed, (in_out, full_attn, attn_heads, attn_dim_head)))):
             is_last = ind == (len(in_out) - 1)
 
-            attn_klass = FullAttention if layer_full_attn else LinearAttention
+            attn_klass = Attention if layer_full_attn else LinearAttention
 
             self.ups.append(ModuleList([
                 ResnetBlock(dim_out + dim_in, dim_out, time_emb_dim=time_dim),
@@ -463,7 +428,7 @@ class Unet(Module):
 
 # gaussian diffusion trainer class
 
-def extract(a, t, x_shape):
+def extract(a, t, x_shape) -> torch.Tensor:
     b, *_ = t.shape
     out = a.gather(-1, t)
     return out.reshape(b, *((1,) * (len(x_shape) - 1)))
@@ -477,41 +442,15 @@ def linear_beta_schedule(timesteps):
     beta_start = scale * 0.0001
     beta_end = scale * 0.02
     return torch.linspace(beta_start, beta_end, timesteps, dtype=torch.float64)
-
-
-def cosine_beta_schedule(timesteps, s=0.008):
-    """
-    cosine schedule
-    as proposed in https://openreview.net/forum?id=-NEXDKk8gZ
-    """
-    steps = timesteps + 1
-    t = torch.linspace(0, timesteps, steps, dtype=torch.float64) / timesteps
-    alphas_cumprod = torch.cos((t + s) / (1 + s) * math.pi * 0.5) ** 2
-    alphas_cumprod = alphas_cumprod / alphas_cumprod[0]
-    betas = 1 - (alphas_cumprod[1:] / alphas_cumprod[:-1])
-    return torch.clip(betas, 0, 0.999)
-
-
-def sigmoid_beta_schedule(timesteps, start=-3, end=3, tau=1, clamp_min=1e-5):
-    """
-    sigmoid schedule
-    proposed in https://arxiv.org/abs/2212.11972 - Figure 8
-    better for images > 64x64, when used during training
-    """
-    steps = timesteps + 1
-    t = torch.linspace(0, timesteps, steps, dtype=torch.float64) / timesteps
-    v_start = torch.tensor(start / tau).sigmoid()
-    v_end = torch.tensor(end / tau).sigmoid()
-    alphas_cumprod = (-((t * (end - start) + start) / tau).sigmoid() + v_end) / (v_end - v_start)
-    alphas_cumprod = alphas_cumprod / alphas_cumprod[0]
-    betas = 1 - (alphas_cumprod[1:] / alphas_cumprod[:-1])
-    return torch.clip(betas, 0, 0.999)
-
+  
 
 class GaussianDiffusion(Module):
     betas: torch.Tensor
     alphas_cumprod: torch.Tensor
     alphas_cumprod_prev: torch.Tensor
+    
+    sqrt_recip_alphas_cumprod: torch.Tensor # alphas_cumprod倒数的开方
+    sqrt_recipm1_alphas_cumprod: torch.Tensor # alphas_cumprod倒数 - 1的开方 
     
     def __init__(
             self,
@@ -549,7 +488,7 @@ class GaussianDiffusion(Module):
 
         # 加的噪声比例
         register_buffer('betas', betas)
-        # (1 - beta)的累乘
+        # (1 - beta)的累乘，即每个时刻原图像的残留率
         register_buffer('alphas_cumprod', alphas_cumprod)
         # alphas_cumprod后移一个数
         register_buffer('alphas_cumprod_prev', alphas_cumprod_prev)
@@ -558,6 +497,7 @@ class GaussianDiffusion(Module):
         register_buffer('sqrt_alphas_cumprod', torch.sqrt(alphas_cumprod))
         register_buffer('sqrt_one_minus_alphas_cumprod', torch.sqrt(1. - alphas_cumprod))
         register_buffer('log_one_minus_alphas_cumprod', torch.log(1. - alphas_cumprod))
+        
         register_buffer('sqrt_recip_alphas_cumprod', torch.sqrt(1. / alphas_cumprod))
         register_buffer('sqrt_recipm1_alphas_cumprod', torch.sqrt(1. / alphas_cumprod - 1))
 
@@ -578,46 +518,61 @@ class GaussianDiffusion(Module):
     def device(self):
         return self.betas.device
 
-    def predict_start_from_noise(self, x_t, t, noise):
-        return (
-                extract(self.sqrt_recip_alphas_cumprod, t, x_t.shape) * x_t -
-                extract(self.sqrt_recipm1_alphas_cumprod, t, x_t.shape) * noise
-        )
+    def predict_start_from_noise(self, x_t: torch.Tensor, t: torch.Tensor, noise: torch.Tensor):
+        """
+        使用x_t，当前时间和噪声计算x_{t-1}
+        """
+        sqrt_recip_alphas_cumprod = extract(self.sqrt_recip_alphas_cumprod, t, x_t.shape)
+        sqrt_recipm1_alphas_cumprod = extract(self.sqrt_recipm1_alphas_cumprod, t, x_t.shape)
+        
+        return sqrt_recip_alphas_cumprod * x_t - sqrt_recipm1_alphas_cumprod * noise
 
-    def predict_noise_from_start(self, x_t, t, x0):
-        return (
-                (extract(self.sqrt_recip_alphas_cumprod, t, x_t.shape) * x_t - x0) /
-                extract(self.sqrt_recipm1_alphas_cumprod, t, x_t.shape)
-        )
+    def predict_noise_from_start(self, x_t: torch.Tensor, t: torch.Tensor, x0: torch.Tensor):
+        """
+        使用x_t，x_{t-1}和时间计算噪声，是predict_start_from_noise的逆向过程，用于修复对x_t进行clip后改变的噪声
+        """
+        sqrt_recip_alphas_cumprod = extract(self.sqrt_recip_alphas_cumprod, t, x_t.shape)
+        sqrt_recipm1_alphas_cumprod = extract(self.sqrt_recipm1_alphas_cumprod, t, x_t.shape)
+        
+        return (sqrt_recip_alphas_cumprod * x_t - x0) / sqrt_recipm1_alphas_cumprod
 
-    def q_posterior(self, x_start, x_t, t):
-        posterior_mean = (
-                extract(self.posterior_mean_coef1, t, x_t.shape) * x_start +
-                extract(self.posterior_mean_coef2, t, x_t.shape) * x_t
-        )
+    def q_posterior(self, x_start: torch.Tensor, x_t: torch.Tensor, t: torch.Tensor):
+        """
+        返回指定时刻
+        x_start
+        """
+        coef1 = extract(self.posterior_mean_coef1, t, x_t.shape)
+        coef2 = extract(self.posterior_mean_coef2, t, x_t.shape) 
+        
+        # 后验均值
+        posterior_mean = coef1 * x_start + coef2 * x_t
+        # 后验方差
         posterior_variance = extract(self.posterior_variance, t, x_t.shape)
+    
         posterior_log_variance_clipped = extract(self.posterior_log_variance_clipped, t, x_t.shape)
         return posterior_mean, posterior_variance, posterior_log_variance_clipped
 
     def model_predictions(self, x, t, clip_x_start=False, rederive_pred_noise=False):
-        model_output = self.model(x, t)
-        maybe_clip = partial(torch.clamp, min=-1., max=1.) if clip_x_start else lambda img: img
-
-        pred_noise = model_output
+        """
+        模型推理，得到预测的噪声和前一时刻的图像
+        """      
+        pred_noise = self.model(x, t)
+   
         x_start = self.predict_start_from_noise(x, t, pred_noise)
-        x_start = maybe_clip(x_start)
+   
+        if clip_x_start:
+            x_start = torch.clamp_(x_start, min=-1, max=1)
+            if rederive_pred_noise:
+                # x_start进行clamp后就与噪声不一致了，所以可能需要重新计算噪声
+                pred_noise = self.predict_noise_from_start(x, t, x_start)
 
-        if clip_x_start and rederive_pred_noise:
-            pred_noise = self.predict_noise_from_start(x, t, x_start)
+        return pred_noise, x_start
 
-        return ModelPrediction(pred_noise, x_start)
-
-    def p_mean_variance(self, x, t, clip_denoised=True):
-        preds = self.model_predictions(x, t)
-        x_start = preds.pred_x_start
-
+    def p_mean_variance(self, x: torch.Tensor, t: torch.Tensor, clip_denoised=True):
+        pred_noise, x_start = self.model_predictions(x, t)
+      
         if clip_denoised:
-            x_start.clamp_(-1., 1.)
+            x_start.clamp_(-1, 1)
 
         model_mean, posterior_variance, posterior_log_variance = self.q_posterior(x_start=x_start, x_t=x, t=t)
         return model_mean, posterior_variance, posterior_log_variance, x_start
@@ -728,8 +683,7 @@ def guass_model(image_size: int, weight: Optional[str] = None) -> GaussianDiffus
     model = GaussianDiffusion(
         Unet(
             dim=64,
-            dim_mults=(1, 2, 4, 8),
-            flash_attn=False
+            dim_mults=(1, 2, 4, 8)
         ),
         image_size=image_size,
         timesteps=1000,  # number of steps

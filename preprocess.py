@@ -61,7 +61,7 @@ def run(
 
     image_count = len(data)
     with h5py.File(target, "w") as h5f:
-        images: h5py.Dataset = h5f.create_dataset("image", (image_count, 3, *target_size), dtype=numpy.uint8)
+        images: h5py.Dataset = h5f.create_dataset("image", (image_count, 3, target_size, target_size), dtype=numpy.uint8)
         for i, d in enumerate(tqdm.tqdm(data, total=image_count, desc="预处理图像")):
             img = cv2.imread(d)
             img = center_crop(img, (target_size, target_size)).transpose(2, 0, 1)
