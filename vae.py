@@ -3,7 +3,6 @@ import cv2
 import torch
 from common import DataSet, utils
 from vae import vae
-from torch.utils.data.dataloader import DataLoader
 
 
 def train(
@@ -19,25 +18,19 @@ def train(
     batch_size = 128
     # 加载数据集
     data_set = DataSet.H5Dataset(dataset)
-    image_shape = data_set[0].shape
-    assert image_shape[0] == 3 and image_shape[1] == image_shape[2]
-    image_size = image_shape[1]
-    data_loader = DataLoader(data_set, batch_size=batch_size, shuffle=True, num_workers=0, pin_memory=True,
-                             drop_last=True)
-
     print(f"图像大小为{image_size}，共{len(data_set)}张")
     
-    model.to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.0002)
+    trainer = vae.VAETrainer(epoch, batch_size, 100, save_path, device)
     # 训练
-    vae.train(model, data_loader, optimizer, epoch, save_path)
+    trainer.train(model, data_set)
 
 
 if __name__ == '__main__':
     image_size = 64
     model = vae.VAE(
         image_size=image_size,
-        reg_weight=0.005,
+        reg_weight=0.1,
+        latent_dim=1024,
     )
     model: vae.VAE = torch.compile(model, fullgraph=True, disable=False) # noqa
 

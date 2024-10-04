@@ -387,8 +387,6 @@ class Unet(Module):
         return 2 ** (len(self.downs) - 1)
 
     def forward(self, x, time):
-        assert all([divisible_by(d, self.downsample_factor) for d in x.shape[
-                                                                     -2:]]), f'your input dimensions {x.shape[-2:]} need to be divisible by {self.downsample_factor}, given the unet'
         x = self.init_conv(x)
         r = x.clone()
 
@@ -705,7 +703,7 @@ def train(
 ):
     device = torch.device("cuda")
 
-    batch_size = 8
+    batch_size = 16
     # 加载数据集
     data_set = DataSet.H5Dataset(dataset)
     image_shape = data_set[0].shape
@@ -752,5 +750,5 @@ if __name__ == "__main__":
     torch.set_float32_matmul_precision('high')
     torch.backends.cudnn.benchmark = True
     
-    train("./run/datasets/flowers64x64.h5", None, save="./run", epoch=5)
+    train("./run/datasets/anime_faces64.h5", None, save="./run", epoch=5)
     sample(64, "./run/gauss_ddpm_weights/guass_diffusion.pth")
