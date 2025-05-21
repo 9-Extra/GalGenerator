@@ -3,6 +3,7 @@ from torch.utils.data.dataloader import DataLoader, Dataset
 import os
 import torch
 import tqdm
+import cv2
 
 
 class VAE(torch.nn.Module):
@@ -12,19 +13,19 @@ class VAE(torch.nn.Module):
 
     image_size: int
     latent_dim: int
-    reg_weight: float
+    kl_weight: float
 
     class _Chunk(torch.nn.Module):
         def forward(self, x: torch.Tensor):
             return x.chunk(2, dim=1)
 
     def __init__(
-        self, image_size: int, latent_dim: int = 128, reg_weight: float = 0.05
+        self, image_size: int, latent_dim: int = 128, kl_weight: float = 0.05
     ) -> None:
         super().__init__()
         self.image_size = image_size
         self.latent_dim = latent_dim
-        self.reg_weight = reg_weight
+        self.kl_weight = kl_weight
 
         self.encoder = torch.nn.Sequential(
             torch.nn.Conv2d(3, 32, 5, stride=2, padding=2),
@@ -107,29 +108,29 @@ class VAE(torch.nn.Module):
 
         latent = self._latent_sample(latent_mean, latent_logvar)
 
-        reconstruct = self.decoder(latent)
-        return reconstruct
+        y = self.decoder(latent)
+        return y
 
     def loss(self, x: torch.Tensor) -> torch.Tensor:
         latent_mean, latent_logvar = self.encoder(x)
         latent = self._latent_sample(latent_mean, latent_logvar)
-        reconstruct = self.decoder(latent)
+        y = self.decoder(latent)
 
-        img_loss = torch.nn.functional.mse_loss(x, reconstruct)
+        img_loss = torch.nn.functional.mse_loss(x, y)
         # 计算两个高斯分布的KL散度，一个是N(latent_mean, exp(latent_logvar))，一个是标准正态分布
         # 对于一元高斯分布，其KL散度为KL = 0.5 * (Mean ** 2 - log(Var) + Var - 1)
         # 这里将latent中的每一维视为独立的高斯分布，分别求出KL散度后再求平均作为损失
-        kl = torch.square_(latent_mean) - latent_logvar + torch.exp(latent_logvar) - 1
-        reg_loss = torch.mean(kl)
+        kl = torch.square(latent_mean) - latent_logvar + torch.exp(latent_logvar) - 1
+        kl_loss = torch.mean(kl)
 
-        return img_loss + reg_loss * self.reg_weight
+        return img_loss + kl_loss * self.kl_weight
 
     def sample(self, count: int) -> torch.Tensor:
         assert not self.training
 
         guass_noise_latent = torch.randn((count, self.latent_dim), device=self.device)
-        reconstruct = self.decoder(guass_noise_latent).clamp_(min=0, max=1)
-        return reconstruct
+        y = self.decoder(guass_noise_latent).clamp_(min=0, max=1)
+        return y
 
 
 def _check_size(vae: VAE):
@@ -187,6 +188,7 @@ class VAETrainer:
         for e in range(1, self.epoch + 1):
             running_loss = []
             for batch in tqdm.tqdm(train_data_loader):
+                
                 batch = batch.to(self.device, non_blocking=True) / 255
 
                 optimizer.zero_grad()

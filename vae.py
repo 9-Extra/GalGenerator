@@ -29,19 +29,19 @@ if __name__ == '__main__':
     image_size = 64
     model = vae.VAE(
         image_size=image_size,
-        reg_weight=0.1,
-        latent_dim=1024,
+        kl_weight=0.01,
+        latent_dim=128,
     )
     model: vae.VAE = torch.compile(model, fullgraph=True, disable=False) # noqa
 
-    save_path = f"./run/weights/vae_reg{model.reg_weight}"
-    # model.load_state_dict(torch.load(os.path.join(save_path, "vae.pth"), weights_only=True))
+    save_path = f"./run/weights/vae_reg{model.kl_weight}"
+    model.load_state_dict(torch.load(os.path.join(save_path, "vae.pth"), weights_only=True))
     train(model, "./run/datasets/anime_faces64.h5", save_path=save_path, epoch=32)
     
     #    
     count = 16
     images = vae.sample(model, 16)
-    image_dir = utils.auto_increase_dir(f"run/result/vae_reg{model.reg_weight}")
+    image_dir = utils.auto_increase_dir(f"run/result/vae_reg{model.kl_weight}")
     for i in range(count):
         cv2.imwrite(os.path.join(image_dir, f"gen{i}.png"), images[i, ...])
 
