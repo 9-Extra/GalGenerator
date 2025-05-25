@@ -3,7 +3,6 @@ from torch.utils.data.dataloader import DataLoader, Dataset
 import os
 import torch
 import tqdm
-import cv2
 
 
 class VAE(torch.nn.Module):
