@@ -13,3 +13,10 @@ class H5Dataset(Dataset):
     def __getitem__(self, idx):
         img = self.images[idx]
         return img
+    
+    def show(self):
+        import cv2
+        print(f"图像大小为{self.images[0].shape}，共{len(self.images)}张")
+        for img in self.images:
+            cv2.imshow("image", img.transpose(1, 2, 0))    
+            cv2.waitKey()
