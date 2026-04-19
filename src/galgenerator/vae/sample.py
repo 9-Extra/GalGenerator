@@ -22,6 +22,7 @@ def main():
     model: VAE = VAE.load_from_checkpoint(args.model, map_location=device, weights_only=False)
     
     image_dir = utils.auto_increase_dir(args.save_dir)
+    image_dir.mkdir(parents=True, exist_ok=True)
     
     num = args.num
     batch = args.batch

@@ -12,16 +12,19 @@ def main():
 
     opt.add_argument('--model', type=str, required=True)
     opt.add_argument('--num', type=int, default=32)
-    opt.add_argument("--batch", type=int, default=128)
+    opt.add_argument("--batch", type=int, default=32)
     opt.add_argument("--device", type=str, default="cuda")
     opt.add_argument("--save_dir", type=str, default="runs/gen-ddpm")
+    opt.add_argument("--compile", action="store_true")
 
     args = opt.parse_args()
 
     device = torch.device(args.device)
     model: DDPM = DDPM.load_from_checkpoint(args.model, map_location=device, weights_only=False)
-
+    model: DDPM = torch.compile(model, disable=not args.compile)
+    
     image_dir = utils.auto_increase_dir(args.save_dir)
+    image_dir.mkdir(parents=True, exist_ok=True)
 
     num = args.num
     batch = args.batch

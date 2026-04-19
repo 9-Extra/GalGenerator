@@ -112,7 +112,7 @@ class UNet(Module):
         self.down4 = Down(256, 512, time_embed_dim)
 
         self.middle_res1 = TimeEmbedResBlock(512, 512, time_embed_dim)
-        self.middle_norm = torch.nn.LayerNorm([512, image_size // 16, image_size // 16])
+        self.middle_attn_norm = torch.nn.GroupNorm(32, 512)
         self.middle_attention = MultiHeadSelfAttentionCV(512, 512)
         self.middle_res2 = TimeEmbedResBlock(512, 512, time_embed_dim)
 
@@ -140,7 +140,8 @@ class UNet(Module):
         x1, x2, x = self.down4(x, embed)
         connect.extend([x1, x2])
 
-        x = self.middle_norm(self.middle_res1(x, embed))
+        x = self.middle_res1(x, embed)
+        x = x + self.middle_attention(self.middle_attn_norm(x))
         x = self.middle_res2(x, embed)
 
         x2, x1 = connect.pop(), connect.pop()
@@ -194,8 +195,8 @@ class DDPM(LightningModule):
         alpha_cumprod = torch.cumprod(self.alpha, dim=0)  # alpha累乘的结果
         self.register_buffer("alpha_cumprod", alpha_cumprod)
         self.register_buffer("alpha_cumprod_sqrt", torch.sqrt(alpha_cumprod))
-        self.register_buffer("one_minus_alpha_cumprod_sqrt", 1.0 - self.alpha_cumprod_sqrt)
-        self.register_buffer("position_encoding", cal_position_encoding(total_timestep, 16))
+        self.register_buffer("one_minus_alpha_cumprod_sqrt", torch.sqrt(1.0 - alpha_cumprod))
+        self.register_buffer("position_encoding", cal_position_encoding(total_timestep, 256))
         position_encoding_size = self.position_encoding.shape[1]  # 位置编码的长度
 
         time_embed_dim = 64 * 4
@@ -237,7 +238,7 @@ class DDPM(LightningModule):
         """
         采样图像，一次生成batch_size个，得到的图像像素取值范围为[-1, 1]，还需要再映射一下
         """
-        device = next(self.parameters()).device
+        device = self.device
 
         alphas_cumprod_prev = torch.nn.functional.pad(self.alpha_cumprod[:-1], (1, 0), value=1.)
         alpha_cumprod_sqrt_rev = 1.0 / self.alpha_cumprod_sqrt

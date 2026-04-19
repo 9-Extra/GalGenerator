@@ -187,14 +187,14 @@ class MultiHeadSelfAttentionCV(Module):
         _, _, w, h = x.shape  # 用于还原
 
         q, k, v = self.qkv(x).chunk(3, dim=1)
-        q, k, v = [einops.rearrange(v, "b (h c) x y -> b h c (x y)", h=self.head) for v in [q, k, v]]
+        q, k, v = [einops.rearrange(v, "b (h c) x y -> b h (x y) c", h=self.head) for v in [q, k, v]]
 
-        # query与key内积
+        # query与key内积（在空间位置维度上计算注意力）
         q = q * self.scale  # 缩放
-        score = torch.einsum("bhcd, bhnd -> bhcn", q, k)  # 每一个请求中每一个向量的相关性
+        score = torch.einsum("bhqc, bhkc -> bhqk", q, k)  # 空间位置之间的相关性
         score = torch.nn.functional.softmax(score, dim=-1)  # 对于相关性进行归一化
-        x = torch.einsum("bhcn, bhnv -> bhcv", score, v)
-        x = einops.rearrange(x, "b h c (x y) -> b (h c) x y", x=w, y=h)
+        x = torch.einsum("bhqk, bhkc -> bhqc", score, v)
+        x = einops.rearrange(x, "b h (x y) c -> b (h c) x y", x=w, y=h)
         return self.out(x)
 
 
