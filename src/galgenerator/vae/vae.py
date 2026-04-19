@@ -134,13 +134,14 @@ class VAE(LightningModule):
 
     def sample(self, count: int) -> torch.Tensor:
         guass_noise_latent = torch.randn((count, self.hparams.latent_dim), device=self.device)
-        y = self.unet.decoder(guass_noise_latent).clamp_(min=0, max=1)
+        y = self.unet.decoder(guass_noise_latent).clamp_(min=-1, max=1)
         return y
 
     # --------------------------训练-----------------------------
     def on_after_batch_transfer(self, batch, dataloader_idx: int):        
         # AMP兼容性：保持float32，AMP会自动处理半精度转换
-        return batch.to(dtype=torch.float32) / 255
+        # 干脆也将图像归一化到[-1, 1]
+        return batch.to(dtype=torch.float32) / 127.5 - 1.0
 
     def training_step(self, batch: torch.Tensor, batch_idx: int):  
         loss = self.loss(batch)

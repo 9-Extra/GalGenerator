@@ -185,6 +185,7 @@ class DDPM(LightningModule):
         self.save_hyperparameters("image_size", "total_timestep", "beta_schedule")
         self.image_size = image_size
         self.total_timestep = total_timestep
+        self.emb_dim = 256 # 位置编码的长度
 
         beta = self._cal_beta(total_timestep, beta_schedule)
 
@@ -196,13 +197,12 @@ class DDPM(LightningModule):
         self.register_buffer("alpha_cumprod", alpha_cumprod)
         self.register_buffer("alpha_cumprod_sqrt", torch.sqrt(alpha_cumprod))
         self.register_buffer("one_minus_alpha_cumprod_sqrt", torch.sqrt(1.0 - alpha_cumprod))
-        self.register_buffer("position_encoding", cal_position_encoding(total_timestep, 256))
-        position_encoding_size = self.position_encoding.shape[1]  # 位置编码的长度
-
-        time_embed_dim = 64 * 4
+        self.register_buffer("position_encoding", cal_position_encoding(total_timestep, self.emb_dim))
+        
+        time_embed_dim = self.emb_dim
         # 先对位置编码使用mlp进行映射
         self.mlp = torch.nn.Sequential(
-            torch.nn.Linear(position_encoding_size, time_embed_dim),
+            torch.nn.Linear(self.emb_dim, time_embed_dim),
             torch.nn.SiLU(),
             torch.nn.Linear(time_embed_dim, time_embed_dim),
             torch.nn.SiLU(),
