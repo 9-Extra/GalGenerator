@@ -1,12 +1,12 @@
 # 扩散模型
-import argparse
 import math
 
 import torch
+import torch.nn.functional as F
+from lightning import LightningModule
 from torch.nn import Module
-import tqdm
 
-from common.common_layers import LinearAttentionCV, MultiHeadSelfAttentionCV, TimeEmbedResBlock
+from ..common.common_layers import MultiHeadSelfAttentionCV, TimeEmbedResBlock
 
 
 class RMSNorm(Module):
@@ -33,7 +33,7 @@ class SinusoidalPosEmb(Module):
         emb = x[:, None] * emb[None, :]
         emb = torch.cat((emb.sin(), emb.cos()), dim=-1)
         return emb
-    
+
 
 @torch.no_grad()
 def cal_position_encoding(time_step: int, emb_dim: int) -> torch.Tensor:
@@ -42,14 +42,12 @@ def cal_position_encoding(time_step: int, emb_dim: int) -> torch.Tensor:
     返回的位置编码形状为[time, emb_dim]，对每个时间都有一个长度为emb_dim的向量
     """
     encoding = torch.empty((time_step, emb_dim), dtype=torch.float32)
-    e = 2 / emb_dim * torch.arange(emb_dim // 2, dtype=torch.float32) # omega的指数部分
+    e = 2 / emb_dim * torch.arange(emb_dim // 2, dtype=torch.float32)  # omega的指数部分
     omega = 10000 ** (-e)
     t_series = torch.arange(time_step)
     omega_t = t_series[:, None] * omega[None, :]
     encoding[:, 0::2] = torch.sin(omega_t)  # 偶数位
-    encoding[:, 1::2] = torch.cos(omega_t)  # 奇数位    
-    # emb = SinusoidalPosEmb(emb_dim)
-    # encoding = emb(torch.arange(time_step))
+    encoding[:, 1::2] = torch.cos(omega_t)  # 奇数位
     return encoding
 
 
@@ -63,12 +61,6 @@ class Down(Module):
         self.res1 = TimeEmbedResBlock(in_channels, in_channels, time_embed_dim)
         self.res2 = TimeEmbedResBlock(in_channels, in_channels, time_embed_dim)
 
-        # self.attention = torch.nn.Sequential(
-        #     torch.nn.GroupNorm(32, in_channels),
-        #     LinearAttentionCV(in_channels, in_channels),
-        #     torch.nn.GroupNorm(32, in_channels),
-        # )
-
         self.down_sample = torch.nn.Sequential(
             torch.nn.Conv2d(in_channels, out_channels, 3, 2, 1),
             torch.nn.SiLU()
@@ -77,7 +69,7 @@ class Down(Module):
     def forward(self, x, embed):
         x1 = self.res1(x, embed)
         x = self.res2(x1, embed)
-        x2 = x # + self.attention(x)
+        x2 = x
         return x1, x2, self.down_sample(x)
 
 
@@ -98,17 +90,10 @@ class Up(Module):
         self.res1 = TimeEmbedResBlock(out_channels + out_channels, out_channels, time_embed_dim)
         self.res2 = TimeEmbedResBlock(out_channels + out_channels, out_channels, time_embed_dim)
 
-        # self.attention = torch.nn.Sequential(
-        #     torch.nn.GroupNorm(32, out_channels),
-        #     LinearAttentionCV(out_channels, out_channels),
-        #     torch.nn.GroupNorm(32, out_channels),
-        # )
-
     def forward(self, x, x1, x2, embed):
         x = self.up_sample(x)
         x = self.res1(torch.cat([x, x1], dim=1), embed)
         x = self.res2(torch.cat([x, x2], dim=1), embed)
-        x = x # + self.attention(x)
         return x
 
 
@@ -156,7 +141,6 @@ class UNet(Module):
         connect.extend([x1, x2])
 
         x = self.middle_norm(self.middle_res1(x, embed))
-        # x = self.middle_attention(x)
         x = self.middle_res2(x, embed)
 
         x2, x1 = connect.pop(), connect.pop()
@@ -173,7 +157,7 @@ class UNet(Module):
         return self.final_conv(x)
 
 
-class Diffusion(Module):
+class DDPM(LightningModule):
     image_size: int
     total_timestep: int
 
@@ -190,12 +174,14 @@ class Diffusion(Module):
     mlp: Module
 
     def __init__(
-            self,
-            image_size: int,
-            total_timestep=1000,
-            beta_schedule="linear",
+        self,
+        image_size: int,
+        total_timestep: int = 1000,
+        beta_schedule: str = "linear",
     ):
         super().__init__()
+
+        self.save_hyperparameters("image_size", "total_timestep", "beta_schedule")
         self.image_size = image_size
         self.total_timestep = total_timestep
 
@@ -223,6 +209,9 @@ class Diffusion(Module):
         # 内部就是个UNet
         self.unet = UNet(image_size, 3, time_embed_dim)
 
+    def name(self) -> str:
+        return f"DDPM-s{self.hparams.image_size}-t{self.hparams.total_timestep}"
+
     def forward(self, x: torch.Tensor, t: torch.Tensor):
         embed = self.mlp(torch.index_select(self.position_encoding, 0, t))
         x = self.unet(x, embed)
@@ -242,14 +231,14 @@ class Diffusion(Module):
         x_t = alpha_over_line_sqrt_t * x_0 + one_sub_alpha_over_line_sqrt_t * noise
 
         return x_t, noise
-    
+
     @torch.no_grad()
     def sample(self, batch_size: int) -> torch.Tensor:
         """
         采样图像，一次生成batch_size个，得到的图像像素取值范围为[-1, 1]，还需要再映射一下
         """
         device = next(self.parameters()).device
-        
+
         alphas_cumprod_prev = torch.nn.functional.pad(self.alpha_cumprod[:-1], (1, 0), value=1.)
         alpha_cumprod_sqrt_rev = 1.0 / self.alpha_cumprod_sqrt
         sqrt_recipm1_alphas_cumprod = torch.sqrt(1.0 / self.alpha_cumprod - 1.0)
@@ -259,6 +248,8 @@ class Diffusion(Module):
         # 后验高斯分布均值的两个系数
         posterior_mean_coef1 = self.beta * torch.sqrt(alphas_cumprod_prev) / (1 - self.alpha_cumprod)
         posterior_mean_coef2 = (1 - alphas_cumprod_prev) * self.alpha_sqrt / (1 - self.alpha_cumprod)
+
+        import tqdm
 
         input_size = (batch_size, 3, self.image_size, self.image_size)
         x = torch.randn(input_size, device=device)  # 从高斯噪声开始
@@ -271,11 +262,9 @@ class Diffusion(Module):
             x_start = alpha_cumprod_sqrt_rev[t] * x - sqrt_recipm1_alphas_cumprod[t] * noise_predicted
             x_start = x_start.clip_(-1.0, 1.0)
             posterior_mean = posterior_mean_coef1[t] * x_start + posterior_mean_coef2[t] * x
-    
+
             pred_img = posterior_mean + torch.sqrt(input=posterior_variance[t]) * z_noise
             x = pred_img
-
-        pass
 
         return x.clip_(-1.0, 1.0)
 
@@ -286,26 +275,33 @@ class Diffusion(Module):
         else:
             raise RuntimeError("No!")
 
+    # --------------------------训练-----------------------------
+    def on_after_batch_transfer(self, batch, dataloader_idx: int):
+        # AMP兼容性：保持float32，AMP会自动处理半精度转换
+        # DDPM将图像归一化到[-1, 1]
+        return batch.to(dtype=torch.float32) / 127.5 - 1.0
 
-def run(
-        device: str
-):
-    batch_size = 16
-    image_size = 160
-    device = torch.device(device)
+    def training_step(self, batch: torch.Tensor, batch_idx: int):
+        # 随机采样时间步
+        t = torch.randint(
+            0, self.total_timestep, (batch.shape[0],), device=batch.device, dtype=torch.long
+        )
 
-    model = Diffusion(
-        image_size,
-        total_timestep=1000,
-        beta_schedule="linear"
-    )
-    model.to(device).train()
+        x_t, noise = self.forward_process(batch, t)
+        noise_predicted = self.forward(x_t, t)
 
-    pass
+        loss = F.mse_loss(noise, noise_predicted)
+        self.log("train_loss", loss, on_step=True, on_epoch=True, prog_bar=True, logger=True)
+        return loss
+
+    def configure_optimizers(self):
+        optimizer = torch.optim.Adam(self.parameters(), lr=2e-4)
+        return optimizer
+
+    # --------------------------推理-----------------------------
+    def predict_step(self, batch):
+        return self.sample(len(batch))
 
 
 if __name__ == '__main__':
-    # 仅仅加载模型
-    opt = argparse.ArgumentParser()
-    opt.add_argument('--device', type=str, default="cuda")
-    run(**vars(opt.parse_args()))
+    ddpm = DDPM(64)

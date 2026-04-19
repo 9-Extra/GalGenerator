@@ -1,8 +1,8 @@
 from pathlib import Path
 import torch
 import cv2
-from common import DataSet
-from gan import dcgan
+from ..common import DataSet
+from . import dcgan
 
 def main():
     device = torch.device("cuda")
