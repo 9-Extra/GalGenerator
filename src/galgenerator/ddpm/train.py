@@ -10,11 +10,10 @@ from ..common import dataset, utils
 from .ddpm import DDPM
 
 
-def _train(model: DDPM, train_data_path: str, epoch: int):
+def _train(model: DDPM, train_data_path: str, epoch: int, batch_size: int):
 
     torch.set_float32_matmul_precision("medium")
 
-    batch_size = 128
     data_set = dataset.ImageDataset(train_data_path)
 
     data_image_size = data_set[0].shape
@@ -78,6 +77,7 @@ def main():
     opt.add_argument('--image_size', type=int, default=128)
     opt.add_argument('--total_timestep', type=int, default=1000)
     opt.add_argument('--beta_schedule', type=str, default="linear")
+    opt.add_argument('--batch_size', type=int, default=32)
 
     args = opt.parse_args()
 
@@ -90,7 +90,7 @@ def main():
     )
     model: DDPM = torch.compile(model, disable=not args.compile)  # noqa
 
-    _train(model, args.data, epoch=args.epoch)
+    _train(model, args.data, epoch=args.epoch, batch_size=args.batch_size)
 
 
 if __name__ == "__main__":
