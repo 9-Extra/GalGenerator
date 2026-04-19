@@ -21,9 +21,14 @@ def main():
     args = opt.parse_args()
 
     device = torch.device(args.device)
-    model: FlowMatch = FlowMatch.load_from_checkpoint(args.model, map_location=device, weights_only=False)
+    model: FlowMatch = FlowMatch.load_from_checkpoint(
+        args.model, map_location=device, weights_only=False
+    )
+    # WeightAveraging callback 在 on_save_checkpoint 中已将 EMA 权重写入 state_dict，
+    # 因此 load_from_checkpoint 加载的就是 EMA 权重（若 checkpoint 保存于训练结束后）。
+    # 若需要在训练中途的 checkpoint 上强制使用 EMA，可通过 Trainer.predict 或手动调用 callback。
     model: FlowMatch = torch.compile(model, disable=not args.compile)
-    
+
     image_dir = utils.auto_increase_dir(args.save_dir)
     image_dir.mkdir(parents=True, exist_ok=True)
 

@@ -200,12 +200,28 @@ class MultiHeadSelfAttentionCV(Module):
 
 class LinearAttentionCV(Module):
     """
-    线性多头注意力层，使用1x1卷积而非线性层进行投影，另外假定输入是图像形式的四维张量
-    相关性的计算方法为Attention(k, q, v) = softmax(q, dim = 2) * (softmax(k, dim = 1).T * v)
-    参考https://zhuanlan.zhihu.com/p/458859501
+    线性多头注意力层（Linear Attention），使用1x1卷积进行投影。
+
+    原理：
+        标准 Attention:  out = softmax(Q @ K^T / sqrt(d)) @ V
+                         复杂度 O(seq_len^2)
+
+        Linear Attention: out = (Q' @ K'^T) @ V = Q' @ (K'^T @ V)
+                         其中 Q' = softmax(Q, dim=-1), K' = softmax(K, dim=-1)
+                         复杂度 O(seq_len)
+
+    计算步骤：
+        1. 将 Q, K 在特征维度 (head_dim) 上做 softmax
+        2. 先算 K^T @ V: [head_dim, head_dim] 矩阵
+        3. 再算 Q @ (K^T @ V): [seq_len, head_dim]
+        4. 除以 head_dim 归一化
+
+    相比标准 Attention 的优势：
+        - 复杂度从 O(N^2) 降到 O(N)，适合长序列（如 32x32=1024）
+        - 效果略低于标准 Attention，但远好于无 Attention
     """
     head: int
-    scale: float  # 缩放系数
+    head_dim: int
 
     qkv: Module  # 使用一个卷积层计算所有head的投影
     out: Module  # 输出时也使用卷积进行投影
@@ -219,8 +235,7 @@ class LinearAttentionCV(Module):
         """
         super().__init__()
         self.head = head
-
-        self.scale = head_dim ** -0.5  # 1 / sqrt(head_dim)
+        self.head_dim = head_dim
         hidden_dim = head * head_dim  # 所有head的隐藏层加起来的维数
         self.qkv = torch.nn.Conv2d(in_dim, hidden_dim * 3, 1, bias=False)
         self.out = torch.nn.Conv2d(hidden_dim, out_dim, 1)
@@ -228,28 +243,28 @@ class LinearAttentionCV(Module):
     def forward(self, x: torch.Tensor):
         """
         :param x: 四维张量[batch, channel, x, y]
+        :return: 同形状的四维张量
         """
         _, _, w, h = x.shape  # 用于还原
 
         q, k, v = self.qkv(x).chunk(3, dim=1)
-        q, k, v = [einops.rearrange(v, "b (h c) x y -> b h (x y) c", h=self.head) for v in [q, k, v]]
-        q: Tensor
-        k: Tensor
-        v: Tensor
+        q, k, v = [einops.rearrange(t, "b (h c) x y -> b h (x y) c", h=self.head) for t in [q, k, v]]
 
-        q = q.softmax(dim=-2)
-        k = k.softmax(dim=-1)
+        # 在特征维度上做 softmax，保证可分解性
+        q = q.softmax(dim=-1)  # [batch, head, seq_len, head_dim]
+        k = k.softmax(dim=-1)  # [batch, head, seq_len, head_dim]
 
-        # 缩放
-        q = q * self.scale
-        v = v / (w * h)
+        # Linear Attention 核心: 先算 K^T @ V，再算 Q @ (K^T @ V)
+        # kv: [batch, head, head_dim, head_dim]
+        kv = torch.einsum("b h n d, b h n e -> b h d e", k, v)
+        # out: [batch, head, seq_len, head_dim]
+        out = torch.einsum("b h n d, b h d e -> b h n e", q, kv)
 
-        # softmax(k).T * v
-        mid = torch.einsum("bh d c, bh d e -> bh c e", k, v)
-        x = torch.einsum("bh d c, bh c e -> bh d e", q, mid)
+        # 除以 head_dim 归一化，防止数值过大
+        out = out / self.head_dim
 
-        x = einops.rearrange(x, "b h (x y) c -> b (h c) x y", x=w, y=h)
-        return self.out(x)
+        out = einops.rearrange(out, "b h (x y) c -> b (h c) x y", x=w, y=h)
+        return self.out(out)
 
 
 class ResBlock(Module):

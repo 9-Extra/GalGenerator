@@ -10,7 +10,7 @@ from ..common import dataset, utils
 from .ddpm import DDPM
 
 
-def _train(model: DDPM, train_data_path: str, epoch: int, batch_size: int):
+def _train(model: DDPM, train_data_path: str, epoch: int, batch_size: int, ckpt_path: str | None = None):
 
     torch.set_float32_matmul_precision("medium")
 
@@ -64,7 +64,7 @@ def _train(model: DDPM, train_data_path: str, epoch: int, batch_size: int):
         benchmark=True,
         callbacks=[checkpoint_callback],
     )
-    trainer.fit(model, train_data_loader)
+    trainer.fit(model, train_data_loader, ckpt_path=ckpt_path)
 
 
 def main():
@@ -78,6 +78,7 @@ def main():
     opt.add_argument('--total_timestep', type=int, default=1000)
     opt.add_argument('--beta_schedule', type=str, default="linear")
     opt.add_argument('--batch_size', type=int, default=32)
+    opt.add_argument('--ckpt', type=str, default=None, help='从已有checkpoint继续训练')
 
     args = opt.parse_args()
 
@@ -90,7 +91,7 @@ def main():
     )
     model: DDPM = torch.compile(model, disable=not args.compile)  # noqa
 
-    _train(model, args.data, epoch=args.epoch, batch_size=args.batch_size)
+    _train(model, args.data, epoch=args.epoch, batch_size=args.batch_size, ckpt_path=args.ckpt)
 
 
 if __name__ == "__main__":

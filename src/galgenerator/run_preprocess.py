@@ -21,7 +21,8 @@ def head_crop(image: numpy.ndarray, target_size: tuple[int, int]) -> numpy.ndarr
         y_start = 0
         image = image[y_start: y_start + target_height, ...]
 
-    image = cv2.resize(image, target_size)
+    if image.shape[:2] != target_size:  
+        image = cv2.resize(image, target_size)
     image = image.transpose((2, 0, 1))
     return image
 

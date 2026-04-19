@@ -10,7 +10,7 @@ from ..common import dataset, utils
 from .vae import VAE
 
 
-def _train(model: VAE, train_data_path: str, epoch: int, batch_size: int):
+def _train(model: VAE, train_data_path: str, epoch: int, batch_size: int, ckpt_path: str | None = None):
 
     torch.set_float32_matmul_precision("medium")
 
@@ -61,7 +61,7 @@ def _train(model: VAE, train_data_path: str, epoch: int, batch_size: int):
         benchmark=True,
         callbacks=[checkpoint_callback],
     )
-    trainer.fit(model, train_data_loader)
+    trainer.fit(model, train_data_loader, ckpt_path=ckpt_path)
 
 def main():
     opt = argparse.ArgumentParser()
@@ -74,6 +74,7 @@ def main():
     opt.add_argument('--kl_weight', type=float, default=0.01)
     opt.add_argument('--latent_dim', type=int, default=128)
     opt.add_argument('--batch_size', type=int, default=128)
+    opt.add_argument('--ckpt', type=str, default=None, help='从已有checkpoint继续训练')
     
     args = opt.parse_args()
     
@@ -86,7 +87,7 @@ def main():
     )
     model: VAE = torch.compile(model, disable=not args.compile)  # noqa
 
-    _train(model, args.data, epoch=args.epoch, batch_size=args.batch_size)
+    _train(model, args.data, epoch=args.epoch, batch_size=args.batch_size, ckpt_path=args.ckpt)
     
 
 if __name__ == "__main__":
