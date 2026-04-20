@@ -251,14 +251,14 @@ class LinearAttentionCV(Module):
         q, k, v = [einops.rearrange(t, "b (h c) x y -> b h (x y) c", h=self.head) for t in [q, k, v]]
 
         # 在特征维度上做 softmax，保证可分解性
-        q = q.softmax(dim=-1)  # [batch, head, seq_len, head_dim]
-        k = k.softmax(dim=-1)  # [batch, head, seq_len, head_dim]
+        q = q.softmax(dim=-1)  # [batch, head, seq_len, channle_dim]
+        k = k.softmax(dim=-1)  # [batch, head, seq_len, channle_dim]
 
-        # Linear Attention 核心: 先算 K^T @ V，再算 Q @ (K^T @ V)
-        # kv: [batch, head, head_dim, head_dim]
-        kv = torch.einsum("b h n d, b h n e -> b h d e", k, v)
-        # out: [batch, head, seq_len, head_dim]
-        out = torch.einsum("b h n d, b h d e -> b h n e", q, kv)
+        # Linear Attention 核心: 先算 K @ V，再算 Q @ (K @ V)
+        # kv: [batch, head, channle_dim, channle_dim]
+        kv = torch.einsum("b h x d, b h x e -> b h d e", k, v)
+        # out: [batch, head, seq_len, channle_dim]
+        out = torch.einsum("b h n x, b h x e -> b h n e", q, kv)
 
         # 除以 head_dim 归一化，防止数值过大
         out = out / self.head_dim

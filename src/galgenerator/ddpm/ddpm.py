@@ -1,38 +1,10 @@
 # 扩散模型
-import math
-
 import torch
 import torch.nn.functional as F
 from lightning import LightningModule
 from torch.nn import Module
 
-from ..common.common_layers import MultiHeadSelfAttentionCV, LinearAttentionCV, TimeEmbedResBlock
-
-
-class RMSNorm(Module):
-    def __init__(self, dim):
-        super().__init__()
-        self.scale = dim ** 0.5
-        self.g = torch.nn.Parameter(torch.ones(1, dim, 1, 1))
-
-    def forward(self, x):
-        return torch.nn.functional.normalize(x, dim=1) * self.g * self.scale
-
-
-class SinusoidalPosEmb(Module):
-    def __init__(self, dim: int, theta=10000):
-        super().__init__()
-        self.dim = dim
-        self.theta = theta
-
-    def forward(self, x):
-        device = x.device
-        half_dim = self.dim // 2
-        emb = math.log(self.theta) / (half_dim - 1)
-        emb = torch.exp(torch.arange(half_dim, device=device) * -emb)
-        emb = x[:, None] * emb[None, :]
-        emb = torch.cat((emb.sin(), emb.cos()), dim=-1)
-        return emb
+from ..common.unet import UNet
 
 
 @torch.no_grad()
@@ -49,151 +21,6 @@ def cal_position_encoding(time_step: int, emb_dim: int) -> torch.Tensor:
     encoding[:, 0::2] = torch.sin(omega_t)  # 偶数位
     encoding[:, 1::2] = torch.cos(omega_t)  # 奇数位
     return encoding
-
-
-class Down(Module):
-    res1: Module
-    res2: Module
-    down_sample: Module
-    attn: Module | None
-    attn_norm: Module | None
-
-    def __init__(self, in_channels, out_channels, time_embed_dim, use_attn: bool = False, use_linear_attn: bool = False):
-        super().__init__()
-        assert not (use_attn and use_linear_attn), "use_attn 和 use_linear_attn 不能同时为 True"
-        self.res1 = TimeEmbedResBlock(in_channels, in_channels, time_embed_dim)
-        self.res2 = TimeEmbedResBlock(in_channels, in_channels, time_embed_dim)
-
-        self.down_sample = torch.nn.Sequential(
-            torch.nn.Conv2d(in_channels, out_channels, 3, 2, 1),
-            torch.nn.SiLU()
-        )
-
-        if use_attn:
-            self.attn_norm = torch.nn.GroupNorm(32, in_channels)
-            self.attn = MultiHeadSelfAttentionCV(in_channels, in_channels)
-        elif use_linear_attn:
-            self.attn_norm = torch.nn.GroupNorm(32, in_channels)
-            self.attn = LinearAttentionCV(in_channels, in_channels)
-        else:
-            self.attn_norm = None
-            self.attn = None
-
-    def forward(self, x, embed):
-        x1 = self.res1(x, embed)
-        x = self.res2(x1, embed)
-        if self.attn is not None:
-            x = x + self.attn(self.attn_norm(x))
-        x2 = x
-        return x1, x2, self.down_sample(x)
-
-
-class Up(Module):
-    """Upscaling then double conv"""
-    res1: Module
-    res2: Module
-    up_sample: Module
-    attn: Module | None
-    attn_norm: Module | None
-
-    def __init__(self, in_channels, out_channels, time_embed_dim, use_attn: bool = False, use_linear_attn: bool = False):
-        super().__init__()
-        assert not (use_attn and use_linear_attn), "use_attn 和 use_linear_attn 不能同时为 True"
-
-        self.up_sample = torch.nn.Sequential(
-            torch.nn.Upsample(scale_factor=2, mode="nearest"),
-            torch.nn.Conv2d(in_channels, out_channels, 3, padding=1)
-        )
-
-        self.res1 = TimeEmbedResBlock(out_channels + out_channels, out_channels, time_embed_dim)
-        self.res2 = TimeEmbedResBlock(out_channels + out_channels, out_channels, time_embed_dim)
-
-        if use_attn:
-            self.attn_norm = torch.nn.GroupNorm(32, out_channels)
-            self.attn = MultiHeadSelfAttentionCV(out_channels, out_channels)
-        elif use_linear_attn:
-            self.attn_norm = torch.nn.GroupNorm(32, out_channels)
-            self.attn = LinearAttentionCV(out_channels, out_channels)
-        else:
-            self.attn_norm = None
-            self.attn = None
-
-    def forward(self, x, x1, x2, embed):
-        x = self.up_sample(x)
-        x = self.res1(torch.cat([x, x1], dim=1), embed)
-        x = self.res2(torch.cat([x, x2], dim=1), embed)
-        if self.attn is not None:
-            x = x + self.attn(self.attn_norm(x))
-        return x
-
-
-class UNet(Module):
-    middle_res1: Module
-    middle_res2: Module
-    middle_attention1: Module
-    middle_attention2: Module
-    middle_norm1: Module
-    middle_norm2: Module
-
-    def __init__(self, image_size: int, n_channels: int, time_embed_dim: int):
-        super(UNet, self).__init__()
-        self.inc = torch.nn.Conv2d(n_channels, 64, 7, padding=3)
-        self.down1 = Down(64, 64, time_embed_dim)
-        self.down2 = Down(64, 128, time_embed_dim)
-        # 32x32 尺度用 LinearAttention（计算量小，能处理长序列）
-        self.down3 = Down(128, 256, time_embed_dim, use_linear_attn=True)
-        # 16x16 尺度用标准 Attention
-        self.down4 = Down(256, 512, time_embed_dim, use_attn=True)
-
-        self.middle_res1 = TimeEmbedResBlock(512, 512, time_embed_dim)
-        self.middle_attn_norm1 = torch.nn.GroupNorm(32, 512)
-        self.middle_attention1 = MultiHeadSelfAttentionCV(512, 512)
-        self.middle_res2 = TimeEmbedResBlock(512, 512, time_embed_dim)
-        self.middle_attn_norm2 = torch.nn.GroupNorm(32, 512)
-        self.middle_attention2 = MultiHeadSelfAttentionCV(512, 512)
-
-        # 对称地在上采样路径也加 Attention
-        self.up1 = Up(512, 256, time_embed_dim, use_attn=True)
-        self.up2 = Up(256, 128, time_embed_dim, use_linear_attn=True)
-        self.up3 = Up(128, 64, time_embed_dim)
-        self.up4 = Up(64, 64, time_embed_dim)
-
-        self.final_res_block = TimeEmbedResBlock(128, 64, time_embed_dim)
-
-        self.final_conv = torch.nn.Conv2d(64, 3, 1)
-
-    def forward(self, x, embed):
-        connect = []  # 传递的连接输出
-
-        x = self.inc(x)
-        r = x.clone()
-
-        x1, x2, x = self.down1(x, embed)
-        connect.extend([x1, x2])
-        x1, x2, x = self.down2(x, embed)
-        connect.extend([x1, x2])
-        x1, x2, x = self.down3(x, embed)
-        connect.extend([x1, x2])
-        x1, x2, x = self.down4(x, embed)
-        connect.extend([x1, x2])
-
-        x = self.middle_res1(x, embed)
-        x = x + self.middle_attention1(self.middle_attn_norm1(x))
-        x = self.middle_res2(x, embed)
-        x = x + self.middle_attention2(self.middle_attn_norm2(x))
-
-        x2, x1 = connect.pop(), connect.pop()
-        x = self.up1(x, x1, x2, embed)
-        x2, x1 = connect.pop(), connect.pop()
-        x = self.up2(x, x1, x2, embed)
-        x2, x1 = connect.pop(), connect.pop()
-        x = self.up3(x, x1, x2, embed)
-        x2, x1 = connect.pop(), connect.pop()
-        x = self.up4(x, x1, x2, embed)
-
-        x = self.final_res_block(torch.cat([x, r], dim=1), embed)
-
-        return self.final_conv(x)
 
 
 class DDPM(LightningModule):
@@ -223,7 +50,7 @@ class DDPM(LightningModule):
         self.save_hyperparameters("image_size", "total_timestep", "beta_schedule")
         self.image_size = image_size
         self.total_timestep = total_timestep
-        self.emb_dim = 256 # 位置编码的长度
+        self.emb_dim = 256  # 位置编码的长度
 
         beta = self._cal_beta(total_timestep, beta_schedule)
 
@@ -234,9 +61,13 @@ class DDPM(LightningModule):
         alpha_cumprod = torch.cumprod(self.alpha, dim=0)  # alpha累乘的结果
         self.register_buffer("alpha_cumprod", alpha_cumprod)
         self.register_buffer("alpha_cumprod_sqrt", torch.sqrt(alpha_cumprod))
-        self.register_buffer("one_minus_alpha_cumprod_sqrt", torch.sqrt(1.0 - alpha_cumprod))
-        self.register_buffer("position_encoding", cal_position_encoding(total_timestep, self.emb_dim))
-        
+        self.register_buffer(
+            "one_minus_alpha_cumprod_sqrt", torch.sqrt(1.0 - alpha_cumprod)
+        )
+        self.register_buffer(
+            "position_encoding", cal_position_encoding(total_timestep, self.emb_dim)
+        )
+
         time_embed_dim = self.emb_dim
         # 先对位置编码使用mlp进行映射
         self.mlp = torch.nn.Sequential(
@@ -256,17 +87,24 @@ class DDPM(LightningModule):
         x = self.unet(x, embed)
         return x
 
-    def forward_process(self, x_0: torch.Tensor, t: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def forward_process(
+        self, x_0: torch.Tensor, t: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         前向过程，为图像加上t次噪声，返回加上噪声后的图像和加上的噪声（训练用）
         :param x_0: 原始图像
         :param t: 前向的时间
         :return: 加噪后图像和噪声
         """
-        noise = torch.randn(x_0.shape, dtype=x_0.dtype, device=x_0.device)  # 生成高斯噪声
-        alpha_over_line_sqrt_t = torch.index_select(self.alpha_cumprod_sqrt, 0, t).view((-1, 1, 1, 1))
-        one_sub_alpha_over_line_sqrt_t = torch.index_select(self.one_minus_alpha_cumprod_sqrt, 0, t).view(
-            (-1, 1, 1, 1))
+        noise = torch.randn(
+            x_0.shape, dtype=x_0.dtype, device=x_0.device
+        )  # 生成高斯噪声
+        alpha_over_line_sqrt_t = torch.index_select(self.alpha_cumprod_sqrt, 0, t).view(
+            (-1, 1, 1, 1)
+        )
+        one_sub_alpha_over_line_sqrt_t = torch.index_select(
+            self.one_minus_alpha_cumprod_sqrt, 0, t
+        ).view((-1, 1, 1, 1))
         x_t = alpha_over_line_sqrt_t * x_0 + one_sub_alpha_over_line_sqrt_t * noise
 
         return x_t, noise
@@ -278,31 +116,53 @@ class DDPM(LightningModule):
         """
         device = self.device
 
-        alphas_cumprod_prev = torch.nn.functional.pad(self.alpha_cumprod[:-1], (1, 0), value=1.)
+        alphas_cumprod_prev = torch.nn.functional.pad(
+            self.alpha_cumprod[:-1], (1, 0), value=1.0
+        )
         alpha_cumprod_sqrt_rev = 1.0 / self.alpha_cumprod_sqrt
         sqrt_recipm1_alphas_cumprod = torch.sqrt(1.0 / self.alpha_cumprod - 1.0)
         # 后验高斯分布的方差
-        posterior_variance = (self.beta * (1 - alphas_cumprod_prev) / (1 - self.alpha_cumprod)).clamp(
-            min=1e-20)
+        posterior_variance = (
+            self.beta * (1 - alphas_cumprod_prev) / (1 - self.alpha_cumprod)
+        ).clamp(min=1e-20)
         # 后验高斯分布均值的两个系数
-        posterior_mean_coef1 = self.beta * torch.sqrt(alphas_cumprod_prev) / (1 - self.alpha_cumprod)
-        posterior_mean_coef2 = (1 - alphas_cumprod_prev) * self.alpha_sqrt / (1 - self.alpha_cumprod)
+        posterior_mean_coef1 = (
+            self.beta * torch.sqrt(alphas_cumprod_prev) / (1 - self.alpha_cumprod)
+        )
+        posterior_mean_coef2 = (
+            (1 - alphas_cumprod_prev) * self.alpha_sqrt / (1 - self.alpha_cumprod)
+        )
 
         import tqdm
 
         input_size = (batch_size, 3, self.image_size, self.image_size)
         x = torch.randn(input_size, device=device)  # 从高斯噪声开始
-        for t in tqdm.tqdm(reversed(range(0, self.total_timestep)), total=self.total_timestep, desc="采样图像"):
+        for t in tqdm.tqdm(
+            reversed(range(0, self.total_timestep)),
+            total=self.total_timestep,
+            desc="采样图像",
+        ):
             # 前向过程
-            z_noise = torch.randn(input_size, device=device) if t != 0 else torch.zeros(input_size, device=device)
+            z_noise = (
+                torch.randn(input_size, device=device)
+                if t != 0
+                else torch.zeros(input_size, device=device)
+            )
             batch_t: torch.Tensor = torch.full((batch_size,), t, device=device)
             noise_predicted = self.forward(x, batch_t)  # 预测出的噪声
 
-            x_start = alpha_cumprod_sqrt_rev[t] * x - sqrt_recipm1_alphas_cumprod[t] * noise_predicted
+            x_start = (
+                alpha_cumprod_sqrt_rev[t] * x
+                - sqrt_recipm1_alphas_cumprod[t] * noise_predicted
+            )
             x_start = x_start.clip_(-1.0, 1.0)
-            posterior_mean = posterior_mean_coef1[t] * x_start + posterior_mean_coef2[t] * x
+            posterior_mean = (
+                posterior_mean_coef1[t] * x_start + posterior_mean_coef2[t] * x
+            )
 
-            pred_img = posterior_mean + torch.sqrt(input=posterior_variance[t]) * z_noise
+            pred_img = (
+                posterior_mean + torch.sqrt(input=posterior_variance[t]) * z_noise
+            )
             x = pred_img
 
         return x.clip_(-1.0, 1.0)
@@ -323,14 +183,20 @@ class DDPM(LightningModule):
     def training_step(self, batch: torch.Tensor, batch_idx: int):
         # 随机采样时间步
         t = torch.randint(
-            0, self.total_timestep, (batch.shape[0],), device=batch.device, dtype=torch.long
+            0,
+            self.total_timestep,
+            (batch.shape[0],),
+            device=batch.device,
+            dtype=torch.long,
         )
 
         x_t, noise = self.forward_process(batch, t)
         noise_predicted = self.forward(x_t, t)
 
         loss = F.mse_loss(noise, noise_predicted)
-        self.log("train_loss", loss, on_step=True, on_epoch=True, prog_bar=True, logger=True)
+        self.log(
+            "train_loss", loss, on_step=True, on_epoch=True, prog_bar=True, logger=True
+        )
         return loss
 
     def configure_optimizers(self):
@@ -342,5 +208,5 @@ class DDPM(LightningModule):
         return self.sample(len(batch))
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     ddpm = DDPM(64)

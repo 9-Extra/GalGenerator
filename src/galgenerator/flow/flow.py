@@ -4,7 +4,7 @@ import torch.nn.functional as F
 from lightning import LightningModule
 from torch.nn import Module
 
-from galgenerator.ddpm.ddpm import UNet, cal_position_encoding
+from galgenerator.common.unet import UNet
 
 
 class FlowMatch(LightningModule):
@@ -12,7 +12,7 @@ class FlowMatch(LightningModule):
 
     omega: torch.Tensor
 
-    unet: Module
+    unet: UNet
     mlp: Module
 
     def __init__(
