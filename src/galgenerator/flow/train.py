@@ -2,7 +2,11 @@ import argparse
 import os
 import torch
 from lightning import Trainer
-from lightning.pytorch.callbacks import ModelCheckpoint
+from lightning.pytorch.callbacks import (
+    ModelCheckpoint,
+    RichModelSummary,
+    ThroughputMonitor,
+)
 from lightning.pytorch.loggers import TensorBoardLogger, CSVLogger
 from torch.utils.data import DataLoader
 
@@ -11,7 +15,13 @@ from ..common.ema_callback import EMAWeightAveraging
 from .flow import FlowMatch
 
 
-def _train(model: FlowMatch, train_data_path: str, epoch: int, batch_size: int, ckpt_path: str | None = None):
+def _train(
+    model: FlowMatch,
+    train_data_path: str,
+    epoch: int,
+    batch_size: int,
+    ckpt_path: str | None = None,
+):
 
     torch.set_float32_matmul_precision("medium")
 
@@ -63,7 +73,12 @@ def _train(model: FlowMatch, train_data_path: str, epoch: int, batch_size: int, 
         logger=loggers,
         precision="16-mixed",
         benchmark=True,
-        callbacks=[checkpoint_callback, EMAWeightAveraging(decay=0.999)],
+        enable_model_summary = False, # callback中已经设置了
+        callbacks=[
+            checkpoint_callback,
+            EMAWeightAveraging(decay=0.999),
+            RichModelSummary(max_depth=2)
+        ],
     )
     trainer.fit(model, train_data_loader, ckpt_path=ckpt_path)
 
@@ -71,24 +86,30 @@ def _train(model: FlowMatch, train_data_path: str, epoch: int, batch_size: int, 
 def main():
     opt = argparse.ArgumentParser()
 
-    opt.add_argument('--data', type=str, default="/media/panpan/datasets/anime_faces_128")
-    opt.add_argument('--epoch', type=int, default=32)
-    opt.add_argument('--compile', action="store_true")
+    opt.add_argument(
+        "--data", type=str, default="/media/panpan/datasets/anime_faces_128"
+    )
+    opt.add_argument("--epoch", type=int, default=32)
+    opt.add_argument("--compile", action="store_true")
 
-    opt.add_argument('--image_size', type=int, default=128)
-    opt.add_argument('--batch_size', type=int, default=32)
-    opt.add_argument('--ckpt', type=str, default=None, help='从已有checkpoint继续训练')
+    opt.add_argument("--image_size", type=int, default=128)
+    opt.add_argument("--batch_size", type=int, default=32)
+    opt.add_argument("--ckpt", type=str, default=None, help="从已有checkpoint继续训练")
 
     args = opt.parse_args()
 
     torch.multiprocessing.set_start_method("spawn")
 
-    model = FlowMatch(
-        image_size=args.image_size
-    )
+    model = FlowMatch(image_size=args.image_size)
     model: FlowMatch = torch.compile(model, disable=not args.compile)  # noqa
 
-    _train(model, args.data, epoch=args.epoch, batch_size=args.batch_size, ckpt_path=args.ckpt)
+    _train(
+        model,
+        args.data,
+        epoch=args.epoch,
+        batch_size=args.batch_size,
+        ckpt_path=args.ckpt,
+    )
 
 
 if __name__ == "__main__":

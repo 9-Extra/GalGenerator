@@ -124,7 +124,7 @@ class MultiHeadSelfAttention(Module):
     v_mlp: Module
     out_mlp: Module
 
-    def __init__(self, in_dim: int, out_dim: int, head: int = 8, head_dim: int = 32):
+    def __init__(self, in_dim: int, out_dim: int, head: int = 8, head_dim: int | None = None):
         """
         :param in_dim: 输入的特征数
         :param out_dim: 输出的特征数
@@ -133,6 +133,7 @@ class MultiHeadSelfAttention(Module):
         """
         super().__init__()
         self.head = head
+        head_dim = head_dim if head_dim is not None else out_dim
 
         self.scale = head_dim ** -0.5
         hidden_dim = head * head_dim  # 所有head的隐藏层加起来的维数
@@ -165,7 +166,7 @@ class MultiHeadSelfAttentionCV(Module):
     qkv: Module  # 使用一个卷积层计算所有head的投影
     out: Module  # 输出时也使用卷积进行投影
 
-    def __init__(self, in_dim: int, out_dim: int, head: int = 8, head_dim: int = 32):
+    def __init__(self, in_dim: int, out_dim: int, head: int = 8, head_dim: int | None = None):
         """
         :param in_dim: 输入的特征数
         :param out_dim: 输出的特征数
@@ -174,6 +175,7 @@ class MultiHeadSelfAttentionCV(Module):
         """
         super().__init__()
         self.head = head
+        head_dim = head_dim if head_dim is not None else out_dim
 
         self.scale = head_dim ** -0.5
         hidden_dim = head * head_dim  # 所有head的隐藏层加起来的维数
@@ -296,33 +298,20 @@ class TimeEmbedResBlock(Module):
     mlp: Module
     adjust: Module
 
-    def __init__(self, in_dim: int, out_dim: int, time_embed_dim: int, group: int = 32):
+    def __init__(self, in_dim: int, out_dim: int, time_embed_dim: int):
         super().__init__()
         self.out_dim = out_dim
 
-        self.conv1 = Conv1(in_dim, out_dim, group)
-        self.conv2 = Conv1(out_dim, out_dim, group)
+        self.conv1 = Conv1(in_dim, out_dim, active=False)
+        self.active = torch.nn.SiLU(True)
+        self.conv2 = Conv1(out_dim, out_dim)
         self.mlp = torch.nn.Linear(time_embed_dim, out_dim * 2)
         self.adjust = torch.nn.Identity() if in_dim == out_dim else torch.nn.Conv2d(in_dim, out_dim, 1)
 
     def forward(self, x: torch.Tensor, time_emb: torch.Tensor):
-        h = self.conv1(x)
+        x1 = x
+        x = self.conv1(x)
         scale, shift = self.mlp(time_emb).unsqueeze_(-1).unsqueeze_(-1).chunk(2, dim=1)
-        h = h * (scale + 1) + shift
-        h = self.conv2(h)
-        return self.adjust(x) + h
-
-
-class ChannelDownSample(Module):
-    """
-    通过将图像切成4块再叠到channel维，最后一个1x1卷积得到输出维数的下采样层
-    """
-    conv: Module
-
-    def __init__(self, in_dim: int, out_dim: int):
-        super().__init__()
-        self.conv = torch.nn.Conv2d(in_dim * 4, out_dim, 1)
-
-    def forward(self, x: torch.Tensor):
-        x = einops.rearrange(x, "b c (x s1) (y s2) -> b (c s1 s2) x y", s1=2, s2=2)
-        return self.conv(x)
+        x = torch.addcmul(shift, x, scale + 1) # 归一化，嵌入，激活
+        x = self.conv2(self.active(x))
+        return x + self.adjust(x1)

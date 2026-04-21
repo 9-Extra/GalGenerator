@@ -4,6 +4,7 @@ import torch.nn.functional as F
 from lightning import LightningModule
 from torch.nn import Module
 
+from galgenerator.common.dic_models import DiC, DiC_default
 from galgenerator.common.unet import UNet
 
 
@@ -12,7 +13,7 @@ class FlowMatch(LightningModule):
 
     omega: torch.Tensor
 
-    unet: UNet
+    unet: DiC
     mlp: Module
 
     def __init__(
@@ -24,10 +25,12 @@ class FlowMatch(LightningModule):
         self.image_size = image_size
         self.emb_dim = 256
         self.save_hyperparameters(dict(image_size=image_size, emb_dim=self.emb_dim))
-        
-        e = 2 / self.emb_dim * torch.arange(self.emb_dim // 2, dtype=torch.float32)  # omega的指数部分
-        self.register_buffer("omega", 10000 ** (-e)) # 时间位置编码的频率
-        
+
+        e = (
+            2 / self.emb_dim * torch.arange(self.emb_dim // 2, dtype=torch.float32)
+        )  # omega的指数部分
+        self.register_buffer("omega", 10 ** (-e))  # 时间位置编码的频率
+
         time_embed_dim = self.emb_dim
         # 先对位置编码使用mlp进行映射
         self.mlp = torch.nn.Sequential(
@@ -37,11 +40,12 @@ class FlowMatch(LightningModule):
             torch.nn.SiLU(),
         )
         # 内部就是个UNet
-        self.unet = UNet(image_size, 3, time_embed_dim)
+        # self.unet = UNet(image_size, 3, time_embed_dim)
+        self.unet = DiC_default(in_channels=3, input_size=self.image_size, max_period=10, depth=[4, 4, 3, 4, 4], hidden_size=64, learn_sigma=False)
 
     def name(self) -> str:
         return f"FLOW-s{self.hparams.image_size}"
-    
+
     @torch.no_grad()
     def timestep_embedding(self, t: torch.Tensor) -> torch.Tensor:
         """
@@ -51,15 +55,15 @@ class FlowMatch(LightningModule):
         """
         batch_size = t.shape[0]
         emb_dim = self.hparams.emb_dim
-        encoding = torch.empty((batch_size, emb_dim), dtype=t.dtype, device=t.device)        
+        encoding = torch.empty((batch_size, emb_dim), dtype=t.dtype, device=t.device)
         omega_t = t[:, None] * self.omega[None, :]
         encoding[:, 0::2] = torch.sin(omega_t)  # 偶数位
         encoding[:, 1::2] = torch.cos(omega_t)  # 奇数位
         return encoding
 
     def forward(self, x: torch.Tensor, t: torch.Tensor):
-        embed = self.mlp(self.timestep_embedding(t))
-        x = self.unet(x, embed)
+        # embed = self.mlp(self.timestep_embedding(t))
+        x = self.unet(x, t)
         return x
 
     def loss(self, x_1: torch.Tensor) -> torch.Tensor:
@@ -72,15 +76,17 @@ class FlowMatch(LightningModule):
         batch_size = x_1.shape[0]
         # [0, 1]内随机采样时间步
         t = torch.rand((batch_size,), device=x_1.device, dtype=x_1.dtype)
-        x_0 = torch.randn(x_1.shape, dtype=x_1.dtype, device=x_1.device)  # 为每张图像生成独立的高斯噪声
-        
-        t_expand = t.view(batch_size, 1, 1, 1) # 满足广播规则
+        x_0 = torch.randn(
+            x_1.shape, dtype=x_1.dtype, device=x_1.device
+        )  # 为每张图像生成独立的高斯噪声
+
+        t_expand = t.view(batch_size, 1, 1, 1)  # 满足广播规则
         x_t = t_expand * x_1 + (1 - t_expand) * x_0
-        v_pred = self.forward(x_t, t) # 预测速度
-        v_gt = x_1 - x_0 # 真实速度
-        
+        v_pred = self.forward(x_t, t)  # 预测速度
+        v_gt = x_1 - x_0  # 真实速度
+
         loss = torch.nn.functional.mse_loss(v_pred, v_gt)
-        
+
         return loss
 
     @torch.no_grad()
@@ -91,17 +97,19 @@ class FlowMatch(LightningModule):
         device = self.device
 
         import tqdm
+
         input_size = (batch_size, 3, self.image_size, self.image_size)
         x_t = torch.randn(input_size, device=device)  # 从高斯噪声开始
         for t in tqdm.tqdm(range(step), total=step, desc="采样图像"):
             # 当前时刻t
-            t = torch.tensor(t / step, device=device, dtype=torch.float32).expand((batch_size,))
-            v_pred = self.forward(x_t, t) # 预测速度
+            t = torch.tensor(t / step, device=device, dtype=torch.float32).expand(
+                (batch_size,)
+            )
+            v_pred = self.forward(x_t, t)  # 预测速度
 
-            x_t += v_pred * (1 / step) # eular法，步进求解方程
-            
+            x_t += v_pred * (1 / step)  # eular法，步进求解方程
+
         return x_t.clip_(-1.0, 1.0)
-
 
     # --------------------------训练-----------------------------
     def on_after_batch_transfer(self, batch, dataloader_idx: int):
@@ -111,7 +119,9 @@ class FlowMatch(LightningModule):
 
     def training_step(self, batch: torch.Tensor, batch_idx: int):
         loss = self.loss(batch)
-        self.log("train_loss", loss, on_step=True, on_epoch=True, prog_bar=True, logger=True)
+        self.log(
+            "train_loss", loss, on_step=True, on_epoch=True, prog_bar=True, logger=True
+        )
         return loss
 
     def configure_optimizers(self):
@@ -123,5 +133,5 @@ class FlowMatch(LightningModule):
         return self.sample(len(batch))
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     ddpm = FlowMatch(64)
