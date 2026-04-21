@@ -19,29 +19,30 @@ class FlowMatch(LightningModule):
     def __init__(
         self,
         image_size: int,
+        depth: list[int]=[6, 6, 5, 6, 6], 
+        hidden_size: int = 64,
+        emb_dim: int = 256,
     ):
         super().__init__()
 
-        self.image_size = image_size
-        self.emb_dim = 256
-        self.save_hyperparameters(dict(image_size=image_size, emb_dim=self.emb_dim))
+        self.save_hyperparameters()
 
         e = (
-            2 / self.emb_dim * torch.arange(self.emb_dim // 2, dtype=torch.float32)
+            2 / emb_dim * torch.arange(emb_dim // 2, dtype=torch.float32)
         )  # omega的指数部分
         self.register_buffer("omega", 10 ** (-e))  # 时间位置编码的频率
 
-        time_embed_dim = self.emb_dim
+        time_embed_dim = emb_dim
         # 先对位置编码使用mlp进行映射
         self.mlp = torch.nn.Sequential(
-            torch.nn.Linear(self.emb_dim, time_embed_dim),
+            torch.nn.Linear(emb_dim, time_embed_dim),
             torch.nn.SiLU(),
             torch.nn.Linear(time_embed_dim, time_embed_dim),
             torch.nn.SiLU(),
         )
         # 内部就是个UNet
         # self.unet = UNet(image_size, 3, time_embed_dim)
-        self.unet = DiC_default(in_channels=3, input_size=self.image_size, max_period=10, depth=[4, 4, 3, 4, 4], hidden_size=64, learn_sigma=False)
+        self.unet = DiC_default(depth=depth, hidden_size=hidden_size, in_channels=3, input_size=image_size, max_period=10, learn_sigma=False)
 
     def name(self) -> str:
         return f"FLOW-s{self.hparams.image_size}"
